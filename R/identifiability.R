@@ -198,6 +198,54 @@ identifiability_context <- function(graph,
     out
 }
 
+## Fixed truth across phasing versions (Nov 7 2026): the truth is drawn once on the
+## phased graph and mapped onto the partially phased / unphased graph.
+## .map_truth_walks(): walks on `from` -> walks on `to`, by node coordinates. A node of
+## `to` with allele major/minor takes the `from` node with the same coordinates and
+## allele; an unphased (or allele-less) node takes both alleles.
+.map_truth_walks <- function(walks, from, to) {
+    loc = function(nd) paste(nd$seqnames, nd$start, nd$end)
+    f = from$nodes$dt; t = to$nodes$dt
+    t.al = if ('allele' %in% names(t)) as.character(t$allele) else rep('unphased', nrow(t))
+    t.key = ifelse(t.al == 'unphased', loc(t), paste(loc(t), t.al))
+    f.key = ifelse(loc(f) %in% loc(t)[t.al != 'unphased'], paste(loc(f), f$allele), loc(f))
+    map = integer(max(f$node.id)); map[f$node.id] = t$node.id[match(f.key, t.key)]
+    if (anyNA(map[f$node.id])) stop('phased truth has nodes missing from this graph')
+    list(snode.id = lapply(walks$snode.id, function(x) sign(x) * map[abs(x)]), circular = walks$circular)
+}
+
+## .walks_to_wiring(): re-pair `right` in w (gg.to.wiring()$internal.edges) so that
+## traverse_graph_cpp() returns `walks`. Each step a -> b takes a free edge copy joining a's
+## exit end to b's entry end; a linear walk starts and ends on free loose-end copies. Errors
+## if the walks don't fit the graph's edges or copy numbers.
+.walks_to_wiring <- function(walks, w) {
+    ends = rbind(w[, .(sub = left, end = paste0(n, 'l'))], w[, .(sub = right, end = paste0(n, 'r'))])
+    ends = ends[, .(k = paste(sort(end), collapse = '|')), by = sub]   # one end = loose copy
+    pool = split(ends$sub, ends$k)
+    take = function(k) {
+        s = pool[[k]]; if (!length(s)) stop('fixed truth needs an edge copy the graph lacks: ', k)
+        pool[[k]] <<- s[-1]; s[1]
+    }
+    ex = function(v) paste0(abs(v), ifelse(v > 0, 'r', 'l'))   # end a walk leaves v by
+    en = function(v) paste0(abs(v), ifelse(v > 0, 'l', 'r'))   # end a walk enters v by
+    pk = function(a, b) paste(sort(c(a, b)), collapse = '|')
+    vis = rbindlist(Map(function(x, circ) {
+        m = length(x)
+        mid = vapply(seq_len(m - 1), function(i) take(pk(ex(x[i]), en(x[i + 1]))), integer(1))
+        if (circ) {
+            cl = take(pk(ex(x[m]), en(x[1]))); inn = c(cl, mid); out = c(mid, cl)
+        } else {
+            inn = c(take(en(x[1])), mid); out = c(mid, take(ex(x[m])))
+        }
+        data.table(n = abs(x), left = ifelse(x > 0, inn, out), right = ifelse(x > 0, out, inn))
+    }, walks$snode.id, walks$circular))
+    w = data.table::copy(w)
+    vis[, r := rowid(n, left)]; w[, r := rowid(n, left)]
+    w[, right := NA_integer_][vis, right := i.right, on = .(n, left, r)]
+    if (nrow(vis) != nrow(w) || anyNA(w$right)) stop('fixed truth does not match graph copy numbers')
+    w[, r := NULL][]
+}
+
 ## A random truth plus up to n_neighbors karyotypes near it. The truth is a
 ## uniformly random wiring (as in sample.gwalks()); n_walkers independent
 ## local.sampling() chains each make n_swaps swaps from it, only at nodes inside
@@ -210,11 +258,18 @@ identifiability_context <- function(graph,
 ## hap is each karyotype's haploid signature (h1/h2 labels dropped), used to
 ## collapse label-only differences after scoring (.local_pick_summary()).
 sample_local_candidates <- function(ctx, n_neighbors = 99, n_walkers = 200, n_swaps = 3,
-                                    mc.cores = 1) {
+                                    mc.cores = 1, truth = NULL) {
     wiring = gg.to.wiring(ctx$graph)
     w = wiring$internal.edges
-    w[, right := if (.N > 1) sample(right) else right, by = n]
+    if (is.null(truth)) {
+        w[, right := if (.N > 1) sample(right) else right, by = n]
+    } else {
+        ## fixed truth (walks on ctx$graph, e.g. mapped from the phased graph): wire w to reproduce it
+        w = .walks_to_wiring(truth, w)
+    }
     truth_raw = traverse_graph_cpp(w, wiring$loose.ends)
+    if (!is.null(truth) && hash_karyotype_cpp(truth_raw$snode.id, truth_raw$circular) !=
+        hash_karyotype_cpp(truth$snode.id, truth$circular)) stop('fixed truth not reproduced on this graph')
     as_gw = function(x) gW(graph = ctx$graph, snode.id = x$snode.id, circular = x$circular)
     truth = as_gw(truth_raw)
     frozen = setdiff(unique(w$n), ctx$use.nodes)
@@ -383,6 +438,7 @@ run_graph_local_identifiability <- function(graph,
                                             edit_mode = 'fragment',
                                             longread_background = 1e-10,
                                             wholegenome = NULL,
+                                            truth_graph_dir = NULL,
                                             mc.cores = 1) {
     modalities = match.arg(modalities, choices = c('hic', 'longread'), several.ok = TRUE)
     ctx = identifiability_context(graph = graph, footprint = footprint, graph_mode = graph_mode,
@@ -392,9 +448,28 @@ run_graph_local_identifiability <- function(graph,
     label = if (!is.null(event$event_id)) as.character(event$event_id) else 'event'
     .identifiability_log(label, 'start: ', length(ctx$graph$nodes), ' nodes, target ',
                          ctx$target_width, ' bp, pix ', ctx$pix.size)
+    ## Fixed truth: with truth_graph_dir (folder of phased graphs, <pair>.rds), draw the truth on
+    ## the event's phased graph exactly as sample_local_candidates() would (same seed, same draw),
+    ## map it onto this graph, and start the usual local sampling from it.
+    tctx = NULL
+    if (!is.null(truth_graph_dir)) {
+        tg = readRDS(file.path(truth_graph_dir, paste0(event$pair, '.rds')))
+        if (!is.null(tg$copy)) tg = tg$copy
+        tctx = identifiability_context(graph = tg, footprint = footprint, graph_mode = graph_mode,
+                                       wholegenome = wholegenome, hic_binsperft = hic_binsperft,
+                                       footprint_buffer_fraction = footprint_buffer_fraction,
+                                       footprint_buffer_min = footprint_buffer_min, edit_mode = edit_mode)
+    }
     if (!is.null(seed)) set.seed(seed)
+    truth = NULL
+    if (!is.null(tctx)) {
+        tw = gg.to.wiring(tctx$graph)$internal.edges
+        tw[, right := if (.N > 1) sample(right) else right, by = n]
+        truth = .map_truth_walks(traverse_graph_cpp(tw, gg.to.wiring(tctx$graph)$loose.ends),
+                                 tctx$graph, ctx$graph)
+    }
     cand = sample_local_candidates(ctx, n_neighbors = n_neighbors, n_walkers = n_walkers,
-                                   n_swaps = n_swaps, mc.cores = mc.cores)
+                                   n_swaps = n_swaps, mc.cores = mc.cores, truth = truth)
     .identifiability_log(label, length(cand$kars) - 1L, ' candidates besides the truth')
 
     nll = list()
