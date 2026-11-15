@@ -13,6 +13,7 @@ sample_hashes <- function(gg, N, chunksize) {
 
 test_that("sample.gwalks karyotype set does not depend on chunksize on small BFB", {
   skip_if_no_loosefix()
+  local_default_genome()
 
   set.seed(42); gg <- gimme_bfb(1e6, 8, cycles = 5)$graph
   expect_identical(sample_hashes(gg, 50, chunksize = 1e3), sample_hashes(gg, 50, chunksize = 10))
@@ -27,6 +28,7 @@ test_that("sample.gwalks karyotype set does not depend on chunksize on repdup", 
 
 test_that("sample.gwalks draws exactly N karyotypes when chunksize does not divide N", {
   skip_if_no_loosefix()
+  local_default_genome()
 
   set.seed(42); gg <- gimme_bfb(1e6, 8, cycles = 5)$graph
   set.seed(1)
@@ -38,6 +40,7 @@ test_that("sample.gwalks draws exactly N karyotypes when chunksize does not divi
 
 test_that("walks reported by sample.gwalks have plausible structure", {
   skip_if_no_loosefix()
+  local_default_genome()
 
   set.seed(42); gg <- gimme_bfb(1e6, 8, cycles = 5)$graph
   V <- nrow(gg.to.wiring(gg)$internal.edges)

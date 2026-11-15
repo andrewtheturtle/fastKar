@@ -32,7 +32,7 @@ NULL
 #' @importFrom gUtils gr.stripstrand gr.tile gr2dt hg_seqlengths parse.gr si2gr streduce
 #' @importFrom gGnome %&% balance embedloops gG gW
 #' @importFrom stats dnbinom dpois median p.adjust pnbinom quantile rnbinom rpois runif setNames
-#' @importFrom utils write.csv
+#' @importFrom utils head tail write.csv
 #' @importFrom methods is
 #' @importFrom GxG cooler gM straw
 #' @importFrom Matrix sparseMatrix

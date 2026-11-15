@@ -14,6 +14,7 @@ shuffle_in_groups <- function(internal_edges, n_groups) {
 
 test_that("v1, v2, batch produce the same partition on a small BFB", {
   skip_if_no_loosefix()
+  local_default_genome()
 
   set.seed(42)
   gg <- gimme_bfb(1e6, 8, cycles = 5)$graph
