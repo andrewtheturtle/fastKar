@@ -32,7 +32,10 @@ Imports:
     digest,
     pbmcapply,
     pbapply,
-    jsonlite
+    jsonlite,
+    stats,
+    utils,
+    methods
 LinkingTo: Rcpp
 Remotes:
     mskilab-org/gGnome,

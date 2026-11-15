@@ -27,9 +27,13 @@ NULL
 #' @importFrom GenomeInfoDb seqlengths
 #' @importFrom data.table CJ as.data.table copy dcast first foverlaps fread is.data.table
 #' @importFrom data.table merge.data.table rbindlist set setDT setattr setkey setkeyv setnames setorder
-#' @importFrom gUtils %O% %Q% dt2gr gr.chr gr.end gr.findoverlaps gr.merge gr.nochr gr.start
+#' @importFrom data.table shift uniqueN
+#' @importFrom gUtils %O% %Q% %^% dt2gr gr.chr gr.end gr.findoverlaps gr.merge gr.nochr gr.start
 #' @importFrom gUtils gr.stripstrand gr.tile gr2dt hg_seqlengths parse.gr si2gr streduce
 #' @importFrom gGnome %&% balance embedloops gG gW
+#' @importFrom stats dnbinom dpois median p.adjust pnbinom quantile rnbinom rpois runif setNames
+#' @importFrom utils write.csv
+#' @importFrom methods is
 #' @importFrom GxG cooler gM straw
 #' @importFrom Matrix sparseMatrix
 #' @importFrom parallel mclapply
