@@ -9,8 +9,8 @@ pix_value = function(gm, a, b) {
 
 ## contacts at positions (x <= y) counted into upper-triangle pixels of bins gr
 bin_contacts = function(x, y, gr) {
-    bx = gr.match(GRanges(1, IRanges(x, width = 1)), gr)
-    by = gr.match(GRanges(1, IRanges(y, width = 1)), gr)
+    bx = gUtils::gr.match(GRanges(1, IRanges(x, width = 1)), gr)
+    by = gUtils::gr.match(GRanges(1, IRanges(y, width = 1)), gr)
     d = data.table(i = pmin(bx, by), j = pmax(bx, by))[, .(value = as.double(.N)), by = .(i, j)]
     rebin_matrix(gM(gr = gr, dat = d), gr)
 }
