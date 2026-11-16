@@ -21,7 +21,7 @@
 #'   noiseless forward_simulate() map on the export's tiles, summed into the data bins; i, j index rows of bins.csv).
 #'   gm_dat.csv holds the observed counts on the data bins (i, j index bins.csv rows); tiled_target.csv has each
 #'   tile's bin.id.
-#' @return named list of the exported tables.
+#' @return named list of the exported tables (conserve.csv: Q_out of conserve_outside(), used by kinf with conserve = True).
 prep_data_for_py <- function(gg,gm,depth,purity=1,pix.size=1e5,target_region=NULL,write.to.folder=NULL,truth=NULL){ 
   if (is.null(target_region)){
     target_region = gg$footprint
@@ -97,7 +97,8 @@ prep_data_for_py <- function(gg,gm,depth,purity=1,pix.size=1e5,target_region=NUL
   gm_rebin = rebin_matrix(gm,bins)
   
   # put in a named list and write to files for Python to read
-  data.out = list(tiled_target = gr2dt(tiled.target),dedup_tiles = dedup.tiles, nodes = dedup.nodes, internal_edges = internal_edges, external_edges = external_edges,bins = gr2dt(bins),gm_dat = gm_rebin$dat,depth=depth,purity=purity)
+  data.out = list(tiled_target = gr2dt(tiled.target),dedup_tiles = dedup.tiles, nodes = dedup.nodes, internal_edges = internal_edges, external_edges = external_edges,bins = gr2dt(bins),gm_dat = gm_rebin$dat,depth=depth,purity=purity,
+                  conserve = data.table(Q_out = conserve_outside(gg)$Q_out))  # genome outside the graph's nodes, for kinf's conserved trans term
   if (!is.null(write.to.folder)){
     lapply(1:length(data.out),function(i){
       thisname = names(data.out)[i]

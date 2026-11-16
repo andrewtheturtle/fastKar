@@ -35,6 +35,12 @@ for k in R['moves']:
     aux = upd(aux, ko, kn, i, j); ko = kn; seq.append(float(T.value(aux)))
 check('300 incremental NLLs', close(seq, R['move_nll']))
 check('incremental == full at the end', close(float(T.value(aux)), float(pr.nll(g, h, b))))
+Tc = pr.nll_term(g, h, conserve=True); updc = jax.jit(Tc.update)  # conserved trans term: exact per move
+b = bs[0]; ko = pr.kar(g, b); aux = Tc.init(ko)
+for k in R['moves'][:50]:
+    i, j = g.moves[k]; b = b.at[i].set(b[j]).at[j].set(b[i]); kn = pr.kar(g, b)
+    aux = updc(aux, ko, kn, i, j); ko = kn
+check('conserve: incremental == full after 50 moves', close(float(Tc.value(aux)), float(pr.nll(g, h, b, conserve=True))))
 kars = []
 for b in bs:
     w, c = pr.perms_to_walks(g, pr.perms_from_b(g, b))
@@ -51,7 +57,9 @@ for b in bs:
     Dw = ref.walkdist(g, b); Df = ref.floyd_warshall(ref.fw_costmat(g, pr.perms_from_b(g, b)))
     ok &= bool(jnp.all(jnp.abs(Dw - Df) <= 1e-9 * jnp.maximum(1.0, jnp.abs(Df))))
 check('walkdist == Floyd-Warshall (10 wirings)', ok)
-check('expected_map == dense reference', all(close(pr.expected_map(h, pr.kar(g, b)), ref.map_from_enddist(h, ref.walkdist(g, b))) for b in bs[:3]))
+_all = jnp.arange(len(h.tc_uid))
+check('expected_map == dense reference', all(close(pr.expected_map(h, pr.kar(g, b)),
+      ref.map_from_enddist(h, ref.walkdist(g, b), C=pr.tc_circ(h, pr.kar(g, b), _all[:, None], _all[None, :]))) for b in bs[:3]))
 
 # (c) from_tables vs load
 nd = pd.read_csv(folder + '/nodes.csv', index_col=0).sort_values('unique.id')

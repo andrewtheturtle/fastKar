@@ -341,7 +341,7 @@ def get_constants(path=_MODEL_PATH):
             d=np.asarray(s['d'], dtype=np.float64),
             lmin=float(m['lmin']), slope=float(m['slope']), maxval=float(m['maxval']),
             diag_a=float(m['diag_spline']['a']), diag_b=float(m['diag_spline']['b']),
-            rho=float(m['interchrom_density']), raw=m)
+            rho=float(m['interchrom_density']), conserve_K=float(m.get('conserve_K', 'nan')), raw=m)
         # knots at log(step * k) for integer k (the fastKar spline is fitted on a bp grid): a table from
         # floor(d / step) to the knot index replaces the binary search
         x = _CACHE[path]['x']; step = np.exp(x[0]); k = np.exp(x) / step
@@ -350,7 +350,89 @@ def get_constants(path=_MODEL_PATH):
                 grid = np.log(step * np.arange(int(np.round(k[-1])) + 1))
             _CACHE[path]['knot_step'] = float(step)
             _CACHE[path]['knot_table'] = np.searchsorted(x, grid, side='right') - 1
+        _CACHE[path].update(_pixint_table(_CACHE[path]))
     return _CACHE[path]
+
+_GL_X = np.array([-0.9061798459386640, -0.5384693101056831, 0.0, 0.5384693101056831, 0.9061798459386640])
+_GL_W = np.array([0.2369268850561891, 0.4786286704993665, 0.5688888888888889, 0.4786286704993665, 0.2369268850561891])
+
+def _spline_np(u, K):
+    """numpy R fmm spline evaluation (as _spline, float64 regardless of the JAX x64 setting)"""
+    x = K['x']; i = np.clip(np.searchsorted(x, u, side='right') - 1, 0, len(x) - 1); dx = u - x[i]
+    return K['y'][i] + dx * (K['b'][i] + dx * (K['c'][i] + dx * K['d'][i]))
+
+def _pixint_table(K):
+    """tables of the pixel-integrated kernel, as DistModel::build_pixint() in src/forward_kernel.cpp: F = int rho and G = int F
+    from s0 = exp(lmin), at the ends of a log grid (step <= 0.002) up to maxval, by 5-point Gauss-Legendre per interval"""
+    lmin, maxval = K['lmin'], K['maxval']
+    a1, a2 = K['slope'] + 1, K['slope'] + 2
+    assert a2 > 0 and abs(a1) > 1e-12, 'pixel integral: power-law slope below the first knot must be > -2 and != -1'
+    s0 = np.exp(lmin); rho0 = np.exp(_spline_np(np.array([lmin]), K))[0]
+    umax = np.log(maxval); N = int(np.ceil((umax - lmin) / 0.002)); gh = (umax - lmin) / N
+    k = np.arange(N); ua = lmin + k * gh; ub = lmin + (k + 1) * gh
+    sa = np.exp(ua); sb = np.exp(ub); sb[-1] = maxval
+    u = 0.5 * (ub - ua)[:, None] * _GL_X[None, :] + 0.5 * (ua + ub)[:, None]; t = np.exp(u)
+    r = np.exp(_spline_np(u, K)) * t * 0.5 * (ub - ua)[:, None] * _GL_W[None, :]   # rho(t) dt
+    gF = np.concatenate([[0.0], np.cumsum(r.sum(1))])
+    dG = gF[:-1] * (sb - sa) + ((sb[:, None] - t) * r).sum(1)                         # int_sa^sb F
+    gG = np.concatenate([[0.0], np.cumsum(dG)])
+    return dict(pi_s0=float(s0), pi_rho0=float(rho0), pi_gu0=float(lmin), pi_gh=float(gh),
+                pi_gs=np.concatenate([[s0], sb]), pi_gF=gF, pi_gG=gG, pi_Fmax=float(gF[-1]), pi_Gmax=float(gG[-1]),
+                pi_M=float(np.exp(_spline_np(np.array([np.log(maxval)]), K))[0] * maxval))
+
+def _table_k(s, K):
+    gs = jnp.asarray(K['pi_gs']); N = gs.shape[0] - 1
+    ls = jnp.log(jnp.clip(s, K['pi_s0'], K['maxval']))
+    k = jnp.clip(jnp.floor((ls - K['pi_gu0']) / K['pi_gh']), 0, N - 1).astype(jnp.int64)
+    D = gs[k + 1] - gs[k]
+    return k, D, (jnp.clip(s, K['pi_s0'], K['maxval']) - gs[k]) / D
+
+def Gfun(s, K):
+    """G(s) = int_{s0}^{s} F, F(s) = int_{s0}^{s} rho (power law below s0, Hermite table, 1/d tail above maxval);
+    as DistModel::Gfun"""
+    s = jnp.maximum(s, 0.0)
+    s0, a1, a2, cc = K['pi_s0'], K['slope'] + 1, K['slope'] + 2, K['pi_rho0'] * K['pi_s0']
+    r = jnp.minimum(s, s0) / s0
+    Gp = cc / a1 * (s0 / a2 * (r ** a2 - 1) - (jnp.minimum(s, s0) - s0))
+    st = jnp.maximum(s, K['maxval'])
+    Gt = K['pi_Gmax'] + K['pi_Fmax'] * (st - K['maxval']) + K['pi_M'] * (st * jnp.log(st / K['maxval']) - st + K['maxval'])
+    k, D, t = _table_k(s, K); gF = jnp.asarray(K['pi_gF']); gG = jnp.asarray(K['pi_gG'])
+    t2 = t * t; t3 = t2 * t
+    Gh = (2 * t3 - 3 * t2 + 1) * gG[k] + (t3 - 2 * t2 + t) * D * gF[k] + (-2 * t3 + 3 * t2) * gG[k + 1] + (t3 - t2) * D * gF[k + 1]
+    return jnp.where(s < s0, Gp, jnp.where(s > K['maxval'], Gt, Gh))
+
+def Ffun(s, K):
+    """F(s) = G'(s), the same pieces as Gfun; as DistModel::Ffun"""
+    s = jnp.maximum(s, 0.0)
+    s0, a1, cc = K['pi_s0'], K['slope'] + 1, K['pi_rho0'] * K['pi_s0']
+    Fp = cc / a1 * ((jnp.minimum(s, s0) / s0) ** a1 - 1)
+    st = jnp.maximum(s, K['maxval'])
+    Ft = K['pi_Fmax'] + K['pi_M'] * jnp.log(st / K['maxval'])
+    k, D, t = _table_k(s, K); gF = jnp.asarray(K['pi_gF']); gG = jnp.asarray(K['pi_gG'])
+    t2 = t * t
+    Fh = (6 * t2 - 6 * t) / D * gG[k] + (3 * t2 - 4 * t + 1) * gF[k] + (-6 * t2 + 6 * t) / D * gG[k + 1] + (3 * t2 - 2 * t) * gF[k + 1]
+    return jnp.where(s < s0, Fp, jnp.where(s > K['maxval'], Ft, Fh))
+
+PIX_NEAR = 20.0  # exact (G-difference) pixel integral for d < PIX_NEAR * max(wa, wb), midpoint beyond (as the C++)
+
+def pixel_contacts(d, wa, wb, C=None, K=None):
+    """pixel-integrated Hi-C kernel between tile copies of widths wa, wb at midpoint distance d > 0, as DistModel::pixel():
+    exact G(d+A) - G(d+B) - G(d-B) + G(d-A) (A, B = half sum / half difference of the widths) for d < PIX_NEAR * max width,
+    midpoint wa wb rho(d) beyond. C: circle length where the two copies lie on one cycle (0 / None: linear); there d is the
+    shorter-way distance and the pixel uses the folded antiderivative Gc(s) = 2 F(C/2) (s - C/2) + G(C - s) above C/2,
+    exactly whenever the pixel reaches past C/2."""
+    K = K or get_constants()
+    A = 0.5 * (wa + wb); B = 0.5 * jnp.abs(wa - wb); wmax = jnp.maximum(wa, wb)
+    C = jnp.zeros_like(d) if C is None else C
+    h = 0.5 * C
+    fold = (C > 0) & (d + A > h)
+    Fh = Ffun(h, K)
+    def G(s):  # one Gfun call: G(s), or G(C - s) + 2 F(h) (s - h) on the folded half
+        up = fold & (s > h)
+        return Gfun(jnp.where(up, C - s, s), K) + jnp.where(up, 2 * Fh * (s - h), 0.0)
+    ex = G(d + A) - G(d + B) - G(d - B) + G(jnp.maximum(d - A, 0.0))
+    mid = wa * wb * distance_density(d, K)
+    return jnp.where(fold | (d < PIX_NEAR * wmax), ex, mid)
 
 def _spline(u, K):
     """R splinefun (fmm) evaluation at u; outside the knots the first/last cubic is extended (as R does)."""
@@ -385,30 +467,77 @@ def diag_contacts(widthprod, K=None):
     K = K or get_constants()
     return jnp.exp(K['diag_a'] + K['diag_b'] * jnp.log(widthprod))
 
-def pair_contacts(d, widthprod, dcut=1e10, dfloor=1e-3, K=None):
-    """widthprod * distance_density(d), times the smooth gate 1/(1+(d/dcut)^4) that removes pairs on different walks"""
+def pair_contacts(d, wa, wb, C=None, dcut=1e10, dfloor=1e-3, K=None):
+    """pixel_contacts(d, wa, wb, C), times the smooth gate 1/(1+(d/dcut)^4) that removes pairs on different walks"""
     d = jnp.maximum(d, dfloor)
     gate = 1.0 / (1.0 + (d / dcut) ** 4)
-    return widthprod * distance_density(d, K) * gate
+    return pixel_contacts(d, wa, wb, C, K) * gate
 
-def contact_matrix(D, w, dcut=1e10, K=None):
-    """per tile-copy pair contacts M[u,v] (symmetric, no mult/depth). D: (ntc,ntc) distances in bp, w: (ntc,) widths."""
+def contact_matrix(D, w, dcut=1e10, K=None, C=None):
+    """per tile-copy pair contacts M[u,v] (symmetric, no mult/depth). D: (ntc,ntc) distances in bp, w: (ntc,) widths,
+    C: (ntc,ntc) circle length of pairs on one cycle (0 otherwise; None: all linear), see tc_circ()."""
     wp = w[:, None] * w[None, :]
     eye = jnp.eye(w.shape[0], dtype=bool)
     Ds = jnp.where(eye, 1.0, D)  # keep the unused branch finite
-    off = pair_contacts(Ds, wp, dcut, K=K)
+    off = pair_contacts(Ds, w[:, None], w[None, :], C, dcut, K=K)
     return jnp.where(eye, diag_contacts(wp, K), off)
 
-def contact_model(D, w, tile_of_copy, w_tile, cn_tile, depth, dcut=1e10, K=None):
+def contact_model(D, w, tile_of_copy, w_tile, cn_tile, depth, dcut=1e10, K=None, C=None, trans=None):
     """expected counts per reference tile pair (full symmetric ntile x ntile; the R map is its upper triangle):
-    value(p,q) = depth/2 * [ sum_{u in p, v in q} M[u,v] + w_p w_q rho cn_p cn_q ]."""
+    value(p,q) = depth/2 * [ sum_{u in p, v in q} M[u,v] + w_p w_q rho cn_p cn_q ]; with trans = (num, Q) (conserved
+    trans term, conserve_trans()) the trans part is num_p num_q / Q instead."""
     K = K or get_constants()
-    M = contact_matrix(D, w, dcut, K)
+    M = contact_matrix(D, w, dcut, K, C)
     ntile = w_tile.shape[0]
     seg = lambda X: jax.ops.segment_sum(X, tile_of_copy, num_segments=ntile)
     R = seg(seg(M).T).T
-    bg = w_tile[:, None] * w_tile[None, :] * K['rho'] * (cn_tile[:, None] * cn_tile[None, :])
+    if trans is None:
+        bg = w_tile[:, None] * w_tile[None, :] * K['rho'] * (cn_tile[:, None] * cn_tile[None, :])
+    else:
+        num, Q = trans
+        bg = num[:, None] * num[None, :] / Q
     return 0.5 * depth * (R + bg)
+
+#### conserved ("balanced") trans term (port of R/conserve.R): every copy-bp has the same total contacts K; trans takes
+#### what cis leaves. Per tile p, num_p = sum over its tile copies of (K w - I) (I = cis contacts >= 10 kb of the copy along
+#### its walk); Q = D S^2 = sum over every half-node copy of (K w - I) + Q_out (genome outside the graph, conserve.csv);
+#### trans pixel = num_p num_q / Q (= w_p w_q D B_p B_q of R's trans_weights()).
+
+CONSERVE_X0 = 1e4  # contacts below 10 kb are outside the conserved budget (conserve_model())
+
+def _Fc(d, K):
+    x0 = CONSERVE_X0
+    return Ffun(jnp.maximum(d, x0), K) - Ffun(x0, K)
+
+def _Gc(x, K):
+    x0 = CONSERVE_X0; x = jnp.maximum(x, x0)
+    return Gfun(x, K) - Gfun(x0, K) - Ffun(x0, K) * (x - x0)
+
+def _seg_cis(x1, x2, L, cyc, K):
+    """cis contacts (>= 10 kb) of the segment [x1, x2] of a walk of length L: G(x2) - G(x1) + G(L - x1) - G(L - x2), on a
+    cycle (x2 - x1) 2 F(L / 2)"""
+    lin = _Gc(x2, K) - _Gc(x1, K) + _Gc(L - x1, K) - _Gc(L - x2, K)
+    return jnp.where(cyc, (x2 - x1) * 2 * _Fc(L / 2, K), lin)
+
+def conserve_trans(hic, kar, K=None):
+    """(num per tile, Q) of the conserved trans term for the wiring kar (contact_model(trans=))"""
+    K = K or get_constants(); Kb = K['conserve_K']
+    e0 = 2 * jnp.asarray(hic.tc_uid); w = jnp.asarray(hic.tc_w)
+    c0, c1 = kar.coord[e0], kar.coord[e0 + 1]
+    xc = c0 + jnp.sign(c1 - c0) * jnp.asarray(hic.offL)  # tile-copy centre along its walk
+    num_tc = Kb * w - _seg_cis(xc - w / 2, xc + w / 2, kar.L[e0], kar.iscyc[e0], K)
+    num = jax.ops.segment_sum(num_tc, jnp.asarray(hic.tc_tile), num_segments=hic.ntile)
+    a, z = kar.coord[0::2], kar.coord[1::2]  # the two ends of every half-node copy
+    x1, x2 = jnp.minimum(a, z), jnp.maximum(a, z)
+    Q = jnp.sum(Kb * (x2 - x1) - _seg_cis(x1, x2, kar.L[0::2], kar.iscyc[0::2], K)) + hic.Q_out
+    return num, Q
+
+def trans_bins(hic, num, Q):
+    """to_bins() of the conserved trans tile map num_p num_q / Q (without the depth / 2 factor), directly on the bins"""
+    nb = jax.ops.segment_sum(num, jnp.asarray(hic.bin_of_tile), num_segments=hic.nbin)
+    dg = jax.ops.segment_sum(num ** 2, jnp.asarray(hic.bin_of_tile), num_segments=hic.nbin)
+    B = nb[:, None] * nb[None, :]
+    return B.at[jnp.arange(hic.nbin), jnp.arange(hic.nbin)].set((jnp.diag(B) + dg) / 2) / Q
 
 #### Hi-C data + likelihood
 
@@ -442,6 +571,8 @@ class HiC:
         h.x_obs[gm['i'].values - 1, gm['j'].values - 1] = np.round(gm['value'].values)  # upper triangle; compdats rounds too
         h.depth = float(pd.read_csv(folder + 'depth.csv')['x'].iloc[0])
         h.purity = float(pd.read_csv(folder + 'purity.csv')['x'].iloc[0])
+        # genome outside the graph's nodes, for the conserved trans term (folders exported before 2026-11-14 have none)
+        h.Q_out = float(rd('conserve')['Q_out'].iloc[0]) if os.path.exists(folder + 'conserve.csv') else float('nan')
         assert h.purity == 1.0, 'purity < 1 not ported'
         return h
 
@@ -477,11 +608,19 @@ def tc_dist(hic, kar, I, J, bigdist=1e12):
     d = jnp.where(uid[I] == uid[J], jnp.abs(oL[I] - oL[J]), m)
     return jnp.where(I == J, 0.0, d)
 
-def expected_map(hic, kar, dcut=1e10):
-    """expected counts, full symmetric tile x tile map (R map = upper triangle), for the wiring kar"""
-    a = jnp.arange(len(hic.tc_uid))
-    return contact_model(tc_dist(hic, kar, a[:, None], a[None, :]), jnp.asarray(hic.tc_w), jnp.asarray(hic.tc_tile),
-                         jnp.asarray(hic.tile_w), jnp.asarray(hic.tile_cn), hic.depth, dcut)
+def tc_circ(hic, kar, I, J):
+    """circle length for tile copies I, J (index arrays, broadcast) on one cycle of the wiring kar, else 0 (pixel_contacts)"""
+    e = 2 * jnp.asarray(hic.tc_uid)
+    ei, ej = e[I], e[J]
+    return jnp.where(kar.iscyc[ei] & (kar.wid[ei] == kar.wid[ej]), kar.L[ei], 0.0)
+
+def expected_map(hic, kar, dcut=1e10, conserve=False):
+    """expected counts, full symmetric tile x tile map (R map = upper triangle), for the wiring kar; conserve: the conserved
+    trans term (as forward_simulate(conserve = TRUE))"""
+    a = jnp.arange(len(hic.tc_uid)); I, J = a[:, None], a[None, :]
+    return contact_model(tc_dist(hic, kar, I, J), jnp.asarray(hic.tc_w), jnp.asarray(hic.tc_tile),
+                         jnp.asarray(hic.tile_w), jnp.asarray(hic.tile_cn), hic.depth, dcut, C=tc_circ(hic, kar, I, J),
+                         trans=conserve_trans(hic, kar) if conserve else None)
 
 def nll_of_bins(hic, mu, theta=2.0, weighted=True):
     """compmaps conventions: NB NLL of the bin map mu over the upper triangle (incl. diagonal), pixel weight widthprod / area0
@@ -491,29 +630,31 @@ def nll_of_bins(hic, mu, theta=2.0, weighted=True):
     tri = jnp.asarray(np.triu(np.ones((n, n), bool)))
     return -jnp.sum(jnp.where(tri, wp * nb_logpmf(jnp.asarray(hic.x_obs), mu, theta), 0.0))
 
-def nll(g, hic, b, theta=2.0, weighted=True):
+def nll(g, hic, b, theta=2.0, weighted=True, conserve=False):
     """full NLL of the wiring b on the data bins"""
-    return nll_of_bins(hic, to_bins(hic, expected_map(hic, kar(g, b))), theta, weighted)
+    return nll_of_bins(hic, to_bins(hic, expected_map(hic, kar(g, b), conserve=conserve)), theta, weighted)
 
-def rescale_depth(g, hic, n, seed, batch=64):
+def rescale_depth(g, hic, n, seed, batch=64, conserve=False):
     """multiply hic.depth (in place) by sum(observed) / median(sum(expected)) over n uniformly random wirings, both over the
     upper triangle of the data-bin map; returns the ratio. The expected map is linear in depth."""
     if len(g.vnodes) == 0:
         n = 1
-    tot = jax.jit(jax.vmap(lambda b: jnp.sum(jnp.triu(to_bins(hic, expected_map(hic, kar(g, b)))))))
+    tot = jax.jit(jax.vmap(lambda b: jnp.sum(jnp.triu(to_bins(hic, expected_map(hic, kar(g, b), conserve=conserve))))))
     r = random_b(g, jax.random.PRNGKey(seed + 7919), n)
     totals = np.concatenate([np.asarray(tot(r[i:i + batch])) for i in range(0, n, batch)])
     ratio = float(np.sum(hic.x_obs) / np.median(totals))
     hic.depth *= ratio
     return ratio
 
-def nll_term(g, hic, dcut=1e10, theta=2.0, weighted=True, caps=(64, 128, 256, 512, 1024, 2048, 4096)):
+def nll_term(g, hic, dcut=1e10, theta=2.0, weighted=True, caps=(64, 128, 256, 512, 1024, 2048, 4096), conserve=False):
     """the exact NLL as an incremental Term; aux = (mu = full symmetric expected BIN map (diagonal = the bin's upper-triangle
     sum), nll). A move swaps b[i], b[j] for two rows of one node. Only the walks through those rows change, and the set S of
     tile copies on them is the same before and after. Copies on different walks have no contacts (beyond the constant
     interchromosomal background), so only copy pairs in S x S change, hence only tile pairs within tiles(S): the update costs
     O(|S|^2) instead of O(ntc^2). S is gathered into a fixed-capacity buffer chosen by lax.switch over a ladder of capacities
-    (so the update cannot be vmapped efficiently); the change of the tile map is summed into the bins of tiles(S) (to_bins)."""
+    (so the update cannot be vmapped efficiently); the change of the tile map is summed into the bins of tiles(S) (to_bins).
+    conserve: the conserved trans term (expected_map(conserve=True)). Every move changes Q, hence every trans pixel, so aux[0]
+    is the CIS bin map (updated as above) and each update rebuilds the trans bin map (trans_bins) and the full NLL (exact)."""
     K = get_constants()
     var_a = jnp.asarray(g.var_a)
     ntc = len(hic.tc_uid); ntile = hic.ntile; nbin = hic.nbin; hd = 0.5 * hic.depth
@@ -532,7 +673,8 @@ def nll_term(g, hic, dcut=1e10, theta=2.0, weighted=True, caps=(64, 128, 256, 51
             valid = jnp.arange(c) < cnt
             I, J = S[:, None], S[None, :]
             wS = tc_w[S]
-            dM = contact_matrix(tc_dist(hic, kn, I, J), wS, dcut, K) - contact_matrix(tc_dist(hic, ko, I, J), wS, dcut, K)
+            dM = (contact_matrix(tc_dist(hic, kn, I, J), wS, dcut, K, tc_circ(hic, kn, I, J))
+                  - contact_matrix(tc_dist(hic, ko, I, J), wS, dcut, K, tc_circ(hic, ko, I, J)))
             dM = jnp.where(valid[:, None] & valid[None, :], dM, 0.0)
             tS = jnp.where(valid, tile_of[S], ntile)
             T = jnp.unique(tS, size=c, fill_value=ntile)
@@ -548,20 +690,28 @@ def nll_term(g, hic, dcut=1e10, theta=2.0, weighted=True, caps=(64, 128, 256, 51
             p, q = U[:, None], U[None, :]
             ok = (p < nbin) & (q < nbin) & (p <= q)
             pc, qc = jnp.minimum(p, nbin - 1), jnp.minimum(q, nbin - 1)
+            if conserve:  # NLL recomputed in full in update()
+                return 0.0, mu.at[p, q].add(dB, mode='drop')
             mo = mu[pc, qc]; xx = x[pc, qc]
             dnll = -jnp.sum(jnp.where(ok, wp[pc, qc] * (nb_logpmf(xx, mo + dB, theta) - nb_logpmf(xx, mo, theta)), 0.0))
             return dnll, mu.at[p, q].add(dB, mode='drop')
         return f
     branches = [branch(c) for c in caps]
 
+    full = lambda mu_cis, kar: mu_cis + hd * trans_bins(hic, *conserve_trans(hic, kar, K))
     def init(kar):
-        mu = to_bins(hic, expected_map(hic, kar, dcut))
+        mu = to_bins(hic, expected_map(hic, kar, dcut, conserve))
+        if conserve:  # aux[0] = cis map
+            mu = mu - hd * trans_bins(hic, *conserve_trans(hic, kar, K))
+            return mu, nll_of_bins(hic, full(mu, kar), theta, weighted)
         return mu, nll_of_bins(hic, mu, theta, weighted)
     def update(aux, ko, kn, i, j):
         tcw = ko.wid[Lu]
         mask = (tcw == ko.wid[var_a[i]]) | (tcw == ko.wid[var_a[j]])
         cnt = mask.sum()
         dnll, mu2 = jax.lax.switch(jnp.searchsorted(caps_arr, cnt), branches, (mask, cnt, ko, kn, aux[0]))
+        if conserve:
+            return mu2, nll_of_bins(hic, full(mu2, kn), theta, weighted)
         return mu2, aux[1] + dnll
     return Term(init, lambda aux: aux[1], update)
 

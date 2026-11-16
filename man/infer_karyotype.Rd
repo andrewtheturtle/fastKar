@@ -32,6 +32,7 @@ infer_karyotype(
   history_every = 0,
   init = NULL,
   init_random = 0,
+  conserve = getOption("fastKar.conserve", FALSE),
   python = NULL,
   verbose = TRUE
 )
@@ -99,6 +100,8 @@ previous infer_karyotype() result or kinf_job (its top-k karyotypes if it has th
 a best_b.npy / gwalks.json / topk.json, or a gWalk on gg. Chains take these wirings in order (round robin).}
 
 \item{init_random}{with init: leave this many chains on random starts (a control).}
+
+\item{conserve}{conserved trans term (as forward_simulate(conserve =)); default getOption('fastKar.conserve', FALSE).}
 
 \item{python}{kinf interpreter (default kinf_python()).}
 }

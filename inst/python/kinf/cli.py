@@ -10,7 +10,7 @@ NLL with --truth), for convergence plots.
 
 Usage: python cli.py PROBLEM OUT [--method pt|greedy] [--chains 16] [--steps 20000] [--block 500]
        [--tmin 1] [--tmax 1000] [--seed 0] [--device auto|gpu|cpu] [--truth] [--topk 1] [--rescale 0] [--history 0]
-       [--init FILE] [--init-random 0] [--spec FILE]
+       [--init FILE] [--init-random 0] [--spec FILE] [--conserve 0]
 --spec FILE: Python file defining make(g, hic) -> dict(terms=..., energy=... optional) (see optimize.optimize); replaces the
 Hi-C NLL, the problem folder then needs only nodes/internal_edges/external_edges (hic = None); incompatible with --rescale/--truth.
 CPU use is capped to FASTKAR_KINF_CORES CPUs (default 8; 0 = no cap) when problem.py is imported, before JAX starts.
@@ -52,14 +52,17 @@ def parse():
     ap.add_argument('--spec', metavar='FILE',
                     help='Python file defining make(g, hic) -> dict(terms=..., energy=... optional) instead of the Hi-C NLL; '
                          'the problem folder then needs no Hi-C files; not with --rescale/--truth')
+    ap.add_argument('--conserve', type=int, default=0, choices=[0, 1],
+                    help='1: conserved trans term (as fastKar forward_simulate(conserve = TRUE); needs conserve.csv in the '
+                         'problem folder, written by prep_data_for_py() since 2026-11-14) [0]')
     ap.add_argument('--truth', action='store_true',
                     help='also score PROBLEM/truth_gwalks.json (simulations): NLL gap and exact recovery')
     return ap.parse_args()
 
 def main():
     a = parse()
-    if a.spec and (a.rescale > 0 or a.truth):
-        sys.exit('error: --spec cannot be combined with --rescale or --truth')
+    if a.spec and (a.rescale > 0 or a.truth or a.conserve):
+        sys.exit('error: --spec cannot be combined with --rescale, --truth or --conserve')
     if a.device == 'cpu':
         os.environ['JAX_PLATFORMS'] = 'cpu'
     os.environ.setdefault('XLA_PYTHON_CLIENT_PREALLOCATE', 'false')  # don't grab 75% of a shared GPU
@@ -79,14 +82,17 @@ def main():
     g = pr.Graph.load(folder)
     hic = None if a.spec else pr.HiC.load(folder, g)
     log(f'problem {folder}: {len(g.nodes)} node ends, {len(g.vnodes)} variable nodes' + ('' if hic is None else f', {hic.nbin} data bins (scored), {hic.ntile} tiles, {len(hic.tc_uid)} tile copies'))
+    cons = bool(a.conserve)
+    if cons and not np.isfinite(hic.Q_out):
+        sys.exit(f'error: --conserve 1 but {folder} has no conserve.csv: re-export with fastKar::prep_data_for_py()')
     depth_ratio = 1.0
     if a.rescale > 0:
-        depth_ratio = pr.rescale_depth(g, hic, a.rescale, a.seed)
+        depth_ratio = pr.rescale_depth(g, hic, a.rescale, a.seed, conserve=cons)
         log(f'depth rescaled by {depth_ratio:.4g} (median over {a.rescale} random wirings): {hic.depth:.4g}')
     nll_truth = None
     if a.truth:
         sn, circ = pr.read_gwalks(folder + '/truth_gwalks.json')
-        nll_truth = float(pr.nll(g, hic, pr.b_from_perms(g, pr.walks_to_perms(g, sn, circ))))
+        nll_truth = float(pr.nll(g, hic, pr.b_from_perms(g, pr.walks_to_perms(g, sn, circ)), conserve=cons))
         log(f'truth NLL {nll_truth:.6g} (reported values below are gaps to it)')
     ref = nll_truth or 0.0
     if a.spec:
@@ -94,7 +100,7 @@ def main():
         s.loader.exec_module(m)
         spec = m.make(g, hic)
     else:
-        spec = dict(terms=[pr.nll_term(g, hic)])
+        spec = dict(terms=[pr.nll_term(g, hic, conserve=cons)])
 
     init = load_init(g, a.init) if a.init else None
     if init:
@@ -131,7 +137,7 @@ def main():
     r = res['summary']
     summ = dict(problem=os.path.abspath(folder), device=str(devs[0].platform), depth=None if hic is None else hic.depth,
                 depth_ratio=depth_ratio, n_walks=len(wk), n_circular=int(sum(circular)),
-                method=a.method, seed=a.seed, chains=r['chains'], steps=r['steps'], block=r['block'],
+                conserve=bool(a.conserve), method=a.method, seed=a.seed, chains=r['chains'], steps=r['steps'], block=r['block'],
                 temps=[float(t) for t in temps], best_nll=best['E'], best_rel=best['E'] - ref,
                 n_var_nodes=r['n_var_nodes'], n_moves=r['n_moves'])
     summ.update({k: r[k] for k in ('acc_rate_per_rung', 'swap_rate', 'wall_s', 'ms_per_proposal') if k in r})

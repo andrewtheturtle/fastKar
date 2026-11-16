@@ -43,9 +43,10 @@ def floyd_warshall(D):
         return jnp.where((idx[:, None] == k) | (idx[None, :] == k), D, upd)
     return jax.lax.fori_loop(0, N, body, D).at[jnp.diag_indices(N)].set(0.0)
 
-def map_from_enddist(hic, Dend, dcut=1e10):
+def map_from_enddist(hic, Dend, dcut=1e10, C=None):
     """end-end distances -> tile-copy distances (min over the 4 end pairings of offset + end distance; |offset difference|
-    within one half copy) -> expected tile map"""
+    within one half copy) -> expected tile map. C: circle length of tile-copy pairs on one cycle (pr.tc_circ; the shortest
+    paths here do not give it), for the folded pixel integral"""
     uid = hic.tc_uid
     Lu = jnp.asarray(2 * uid); Ru = jnp.asarray(2 * uid + 1)
     oL = jnp.asarray(hic.offL); oR = jnp.asarray(hic.offR)
@@ -57,4 +58,4 @@ def map_from_enddist(hic, Dend, dcut=1e10):
                   jnp.min(jnp.stack([LL, RR, LR, RL]), axis=0))
     d = jnp.where(jnp.eye(len(uid), dtype=bool), 0.0, d)
     return pr.contact_model(d, jnp.asarray(hic.tc_w), jnp.asarray(hic.tc_tile), jnp.asarray(hic.tile_w),
-                            jnp.asarray(hic.tile_cn), hic.depth, dcut)
+                            jnp.asarray(hic.tile_cn), hic.depth, dcut, C=C)

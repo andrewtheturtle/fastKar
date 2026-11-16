@@ -375,6 +375,7 @@ kinf_check = function(python = NULL, backend = c('local', 'slurm'), device = c('
 #'   previous infer_karyotype() result or kinf_job (its top-k karyotypes if it has them, else its best), a path to
 #'   a best_b.npy / gwalks.json / topk.json, or a gWalk on gg. Chains take these wirings in order (round robin).
 #' @param init_random with init: leave this many chains on random starts (a control).
+#' @param conserve conserved trans term (as forward_simulate(conserve =)); default getOption('fastKar.conserve', FALSE).
 #' @param python kinf interpreter (default kinf_python()).
 #' @return list(gw = gWalk on gg, summary = list from summary.json, trace = data.table of the search curve
 #'   (best and per-rung NLL per block), workdir); with topk > 1 also kars (list of gWalks, best first) and nlls;
@@ -385,7 +386,8 @@ infer_karyotype = function(gg, hic, depth = NULL, pix.size = 1e6, target_region 
                            tmax = 1000, seed = 0, device = c('auto', 'gpu', 'cpu'), gpu = NULL, cores = NULL,
                            backend = c('local', 'slurm'), slurm = list(), wait = TRUE, workdir = NULL,
                            truth = NULL, topk = 1, rescale = FALSE, history_every = 0, init = NULL,
-                           init_random = 0, python = NULL, verbose = TRUE){
+                           init_random = 0, conserve = getOption('fastKar.conserve', FALSE), python = NULL,
+                           verbose = TRUE){
   method = match.arg(method); device = match.arg(device); backend = match.arg(backend)
   if (purity != 1) stop('purity != 1 is not supported by the Python model yet')
   py = kinf_python(python)
@@ -426,6 +428,7 @@ infer_karyotype = function(gg, hic, depth = NULL, pix.size = 1e6, target_region 
                                  tmax = tmax, seed = seed, topk = topk, history = as.integer(history_every),
                                  rescale = if (isTRUE(rescale)) 256L else as.integer(rescale),
                                  init = init_file, `init-random` = if (!is.null(init_file)) as.integer(init_random),
+                                 conserve = as.integer(isTRUE(conserve)),
                                  device = if (backend == 'slurm' && device == 'auto') 'gpu' else device),
                      truth = !is.null(truth), backend = backend, slurm = slurm, wait = wait, gpu = gpu,
                      cores = cores, verbose = verbose)

@@ -37,7 +37,7 @@ gm_dat.csv holds the observed counts on the data bins (i, j index bins.csv rows)
 tile's bin.id.}
 }
 \value{
-named list of the exported tables.
+named list of the exported tables (conserve.csv: Q_out of conserve_outside(), used by kinf with conserve = True).
 }
 \description{
 Splits every node of gg into a left and a right half, gives each copy of each half-node its
