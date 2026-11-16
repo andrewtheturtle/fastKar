@@ -19,5 +19,6 @@ out = list(distance_spline = spl(fd), diag_spline = list(type = 'linear_in_log',
   lmin = lmin, slope = fd(lmin, deriv = 1),
   interchrom_density = interchrom_density, maxval = 1e8,
   maxval_density = distance_density(1e8),
+  conserve_K = conserve_model()$K,  # per copy-bp contact budget of the conserved trans term (R/conserve.R)
   check = chk)
 writeLines(jsonlite::toJSON(out, auto_unbox = TRUE, digits = NA, na = 'null'), 'inst/python/kinf/data/fastkar_model.json')

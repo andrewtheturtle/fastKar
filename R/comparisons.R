@@ -440,6 +440,10 @@ estimate.depthratio <- function(filepath,res=1e6,ploidy=2,if.chr=FALSE,purity=1)
         chroms = rhdf5::h5read(filepath, paste0('/resolutions/', as.integer(res), '/chroms'))
         main = grepl('^(chr)?([0-9]+|X|Y)$', chroms$name)
         wholegenome = gr.tile(si2gr(setNames(as.numeric(chroms$length[main]), sub('^chr', '', chroms$name[main]))),res)
+    }else if (mode=='hic'){ #chromosome lengths from the file too (hg38 .hic files would otherwise be tiled with hg19 lengths)
+        chroms = strawr::readHicChroms(filepath)
+        main = grepl('^(chr)?([0-9]+|X|Y)$', chroms$name)
+        wholegenome = gr.tile(si2gr(setNames(as.numeric(chroms$length[main]), sub('^chr', '', chroms$name[main]))),res)
     }else{
         wholegenome = gr.tile(si2gr(hg_seqlengths()[1:24]),res)
     }

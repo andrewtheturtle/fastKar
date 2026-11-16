@@ -12,6 +12,7 @@ test_that('the shipped kinf model json matches the current forward model', {
     expect_equal(m$check$diag, chk$diag, tolerance = 1e-10)
     expect_equal(m$interchrom_density, interchrom_density, tolerance = 1e-10)
     expect_equal(m$maxval_density, distance_density(1e8), tolerance = 1e-10)
+    expect_equal(m$conserve_K, opt('conserve_model')()$K, tolerance = 1e-10)
     z = environment(splineobj$distance_spline)$z
     for (k in c('x', 'y', 'b', 'c', 'd')) expect_equal(m$distance_spline[[k]], z[[k]], tolerance = 1e-10)
 })
