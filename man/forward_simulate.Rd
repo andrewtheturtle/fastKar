@@ -16,7 +16,8 @@ forward_simulate(
   model = 0,
   if.interchr = T,
   gm.out = T,
-  prepped = NULL
+  prepped = NULL,
+  conserve = getOption("fastKar.conserve", FALSE)
 )
 }
 \arguments{
@@ -32,7 +33,7 @@ forward_simulate(
 
 \item{if.sum}{boolean deciding whether to sum the simulated Hi-C signal from all walks or whether to return a list of Hi-C maps (defaults to TRUE)}
 
-\item{depth}{depth of the simulated Hi-C data, in X coverage (defaults to 1)}
+\item{depth}{Hi-C depth as returned by estimate.depthratio() (defaults to 1); halved here to the per-haploid-copy depth that simulate_walks() and simulate_diploid_map() take}
 
 \item{purity}{tumor purity/fraction of the sample explained by the supplied walks (defaults to 1). If less than 1, the remaining fraction is simulated as a diploid reference genome over the same context and added to the tumor simulation.}
 
@@ -43,6 +44,8 @@ forward_simulate(
 \item{gm.out}{boolean, chooses whether to return a gMatrix or a data.table (defaults to TRUE, returning a gMatrtix)}
 
 \item{prepped}{optional result of prep_for_sim() for this graph, target_region and pix.size, reused instead of tiling again (target_region, pix.size and if.comps are then not used for tiling)}
+
+\item{conserve}{use the contact-conserving trans term (R/conserve.R): every copy-bp has the same total contacts, so copies that lose cis (circles, short walks, walk ends) get more trans. Default getOption('fastKar.conserve', FALSE)}
 }
 \value{
 either a gMatrix (gm.out = if.sum = T), a list of gMatrices (gm.out = T, if.sum = F), a data.table (gm.out = F, if.sum = T), or a list of data.tables (gm.out = if.sum = F)

@@ -2,8 +2,8 @@
 % Please edit documentation in R/RcppExports.R
 \name{forward_diploid_cpp}
 \alias{forward_diploid_cpp}
-\title{simulate_diploid_map() values (Hi-C model) in pixel-id order, before is.na and depth:
-2 * the single-copy map on same-chromosome pixels, plus the interchromosomal term if asked.}
+\title{simulate_diploid_map() cis values (Hi-C model) in pixel-id order, at depth 1: 2 * the single-copy map on
+same-chromosome pixels, NaN -> 0. The trans term and the depth are added by forward_assemble_cpp().}
 \usage{
 forward_diploid_cpp(
   chrom,
@@ -14,13 +14,10 @@ forward_diploid_cpp(
   slope,
   maxval,
   maxval_density,
-  interchr,
-  rho,
-  depth,
   diagf
 )
 }
 \description{
-simulate_diploid_map() values (Hi-C model) in pixel-id order, before is.na and depth:
-2 * the single-copy map on same-chromosome pixels, plus the interchromosomal term if asked.
+simulate_diploid_map() cis values (Hi-C model) in pixel-id order, at depth 1: 2 * the single-copy map on
+same-chromosome pixels, NaN -> 0. The trans term and the depth are added by forward_assemble_cpp().
 }

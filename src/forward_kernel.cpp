@@ -17,6 +17,16 @@ using namespace Rcpp;
 
 namespace {
 
+// Pixel-integral table (build_pixint) of the last Hi-C spline seen, reused while the spline and its constants are
+// unchanged (it is the same package spline on every call; rebuilding it costs ~23k spline evaluations per kernel call).
+struct PixCache {
+    bool valid = false;
+    std::vector<double> key;  // lmin, slope, maxval, maxval_density, then x, y, b, c, d of the spline
+    double s0 = 0, rho0 = 0, Fmax = 0, Gmax = 0, gu0 = 0, gh = 0;
+    std::vector<double> gs, gF, gG;
+};
+PixCache pix_cache;
+
 // The distance part of the model: knots and coefficients of the fmm spline plus the
 // constants of distance_density() and simulate_map().
 struct DistModel {
@@ -43,6 +53,25 @@ struct DistModel {
         model = model_;
         model_type = model_ > 0 ? 1 : 0;
         lr_denom = lr_denom_;
+        if (model_type == 0) pixint_cached();
+    }
+
+    // the pixel-integral table from pix_cache if built for this exact spline, else built and cached
+    void pixint_cached() {
+        std::vector<double> key;
+        key.reserve(4 + 5 * n);
+        key.push_back(lmin); key.push_back(slope); key.push_back(maxval); key.push_back(maxval_density);
+        for (const double *v : {x, y, b, c, d}) key.insert(key.end(), v, v + n);
+        if (pix_cache.valid && pix_cache.key == key) {
+            s0 = pix_cache.s0; rho0 = pix_cache.rho0; Fmax = pix_cache.Fmax; Gmax = pix_cache.Gmax;
+            gu0 = pix_cache.gu0; gh = pix_cache.gh; gs = pix_cache.gs; gF = pix_cache.gF; gG = pix_cache.gG;
+            return;
+        }
+        build_pixint();
+        pix_cache.key.swap(key);
+        pix_cache.s0 = s0; pix_cache.rho0 = rho0; pix_cache.Fmax = Fmax; pix_cache.Gmax = Gmax;
+        pix_cache.gu0 = gu0; pix_cache.gh = gh; pix_cache.gs = gs; pix_cache.gF = gF; pix_cache.gG = gG;
+        pix_cache.valid = true;
     }
 
     // R's spline_eval for one point, method != 2 (no natural-spline left extrapolation).
@@ -78,6 +107,122 @@ struct DistModel {
         return y[i] + dx * (b[i] + dx * (c[i] + dx * d[i]));
     }
 
+    // ---- pixel-integrated Hi-C kernel (the Hi-C model; the long-read model stays at the midpoint) ----
+    // The value of a pixel between tiles of widths wa, wb with midpoint distance d is the integral of
+    // rho(|x - y|) over the two tiles. Near the diagonal (d < PIX_NEAR * max(wa, wb)) it is exact through
+    // G'' = rho: G(d + (wa+wb)/2) - G(d + |wa-wb|/2) - G(d - |wa-wb|/2) + G(d - (wa+wb)/2), with F = int rho,
+    // G = int F from s0 = exp(lmin) (closed forms below s0 and above maxval, a cubic Hermite table in s
+    // between). Farther out the midpoint value wa wb rho(d) is used: the pixel-average correction is < ~1e-3
+    // there, and a second-order term in rho'' is unusable because the interpolating spline's rho'' is noisy.
+    // Exact-formula error vs quadrature (2026-11-13): <= 5e-4 up to 20 widths.
+    static constexpr double PIX_NEAR = 20.0;  // exact (G) for dist < PIX_NEAR * max(wa, wb)
+    double s0 = 0, rho0 = 0, Fmax = 0, Gmax = 0, gu0 = 0, gh = 0;
+    std::vector<double> gs, gF, gG;
+
+    inline double dens_u(double u, R_xlen_t &hint) const {  // rho at s = exp(u), s0 <= s <= maxval
+        return std::exp(spline(u, hint));
+    }
+
+    void build_pixint() {
+        s0 = std::exp(lmin);
+        R_xlen_t h0 = 0;
+        rho0 = std::exp(spline(lmin, h0));
+        double umax = std::log(maxval);
+        int N = (int) std::ceil((umax - lmin) / 0.002);
+        if (N < 1) stop("pixint: maxval must exceed the first knot");
+        gu0 = lmin; gh = (umax - lmin) / N;
+        gs.assign(N + 1, 0); gF.assign(N + 1, 0); gG.assign(N + 1, 0);
+        // 5-point Gauss-Legendre on each u interval
+        static const double gx[5] = {-0.9061798459386640, -0.5384693101056831, 0.0, 0.5384693101056831, 0.9061798459386640};
+        static const double gw[5] = {0.2369268850561891, 0.4786286704993665, 0.5688888888888889, 0.4786286704993665, 0.2369268850561891};
+        R_xlen_t hint = 0;
+        gs[0] = s0;
+        for (int k = 0; k < N; ++k) {
+            double ua = gu0 + k * gh, ub = gu0 + (k + 1) * gh;
+            double sa = std::exp(ua), sb = (k + 1 == N) ? maxval : std::exp(ub);
+            gs[k + 1] = sb;
+            double dF = 0, dG2 = 0;
+            for (int q = 0; q < 5; ++q) {
+                double u = 0.5 * (ub - ua) * gx[q] + 0.5 * (ua + ub);
+                double t = std::exp(u);
+                double r = dens_u(u, hint) * t * 0.5 * (ub - ua) * gw[q];   // rho(t) dt
+                dF += r;
+                dG2 += (sb - t) * r;                                         // int (sb - t) rho(t) dt
+            }
+            gF[k + 1] = gF[k] + dF;
+            gG[k + 1] = gG[k] + gF[k] * (sb - sa) + dG2;                    // int_sa^sb F = F(sa)(sb - sa) + int (sb - t) rho
+        }
+        Fmax = gF[N]; Gmax = gG[N];
+    }
+
+    // G(s) = int_{s0}^{s} F, F(s) = int_{s0}^{s} rho (power law below s0, table, 1/d tail above maxval)
+    inline double Gfun(double s) const {
+        if (s < s0) {
+            if (s < 0) s = 0;
+            double a1 = slope + 1, a2 = slope + 2, cc = rho0 * s0, r = s / s0;
+            if (a2 <= 0) stop("pixint: density slope below the first knot must exceed -2");
+            if (std::fabs(a1) < 1e-12) return cc * ((s > 0 ? s * std::log(r) : 0) - s + s0);
+            return cc / a1 * (s0 / a2 * (std::pow(r, a2) - 1) - (s - s0));
+        }
+        if (s > maxval) {
+            double M = maxval_density * maxval;
+            return Gmax + Fmax * (s - maxval) + M * (s * std::log(s / maxval) - s + maxval);
+        }
+        int N = (int) gs.size() - 1;
+        int k = (int) std::floor((std::log(s) - gu0) / gh);
+        if (k < 0) k = 0;
+        if (k > N - 1) k = N - 1;
+        while (k > 0 && s < gs[k]) --k;
+        while (k < N - 1 && s > gs[k + 1]) ++k;
+        double D = gs[k + 1] - gs[k], t = (s - gs[k]) / D;
+        double t2 = t * t, t3 = t2 * t;
+        return (2 * t3 - 3 * t2 + 1) * gG[k] + (t3 - 2 * t2 + t) * D * gF[k] + (-2 * t3 + 3 * t2) * gG[k + 1] + (t3 - t2) * D * gF[k + 1];
+    }
+
+    // F(s) = G'(s): the same pieces as Gfun (the table's Hermite derivative between knots)
+    inline double Ffun(double s) const {
+        if (s < s0) {
+            if (s <= 0) s = 0;
+            double a1 = slope + 1, cc = rho0 * s0, r = s / s0;
+            if (std::fabs(a1) < 1e-12) return s > 0 ? cc * std::log(r) : -INFINITY;
+            return cc / a1 * (std::pow(r, a1) - 1);
+        }
+        if (s > maxval) return Fmax + maxval_density * maxval * std::log(s / maxval);
+        int N = (int) gs.size() - 1;
+        int k = (int) std::floor((std::log(s) - gu0) / gh);
+        if (k < 0) k = 0;
+        if (k > N - 1) k = N - 1;
+        while (k > 0 && s < gs[k]) --k;
+        while (k < N - 1 && s > gs[k + 1]) ++k;
+        double D = gs[k + 1] - gs[k], t = (s - gs[k]) / D;
+        double t2 = t * t;
+        return (6 * t2 - 6 * t) / D * gG[k] + (3 * t2 - 4 * t + 1) * gF[k] + (-6 * t2 + 6 * t) / D * gG[k + 1] + (3 * t2 - 2 * t) * gF[k + 1];
+    }
+
+    // pixel value (dist > 0) between tiles of widths wa, wb
+    // On a circular walk of length circ_len (> 0; 0 = linear) dist is the shorter-way distance and the contact distance of
+    // a pair at separation s is min(s, circ_len - s): the pixel uses Gc, the second antiderivative of that folded density,
+    // Gc(s) = G(s) for s <= h = circ_len / 2 and 2 F(h) (s - h) + G(circ_len - s) above. Exact whenever the pixel's
+    // separations [dist - A, dist + A] reach past h (also beyond PIX_NEAR widths).
+    inline double Gcirc(double s, double circ_len) const {
+        double h = 0.5 * circ_len;
+        if (s <= h) return Gfun(s);
+        return 2 * Ffun(h) * (s - h) + Gfun(circ_len - s);
+    }
+
+    inline double pixel(double wa, double wb, double dist, R_xlen_t &hint, double circ_len = 0) const {
+        double wmax = wa > wb ? wa : wb;
+        double A = 0.5 * (wa + wb);
+        bool fold = circ_len > 0 && dist + A > 0.5 * circ_len;
+        if (fold || dist < PIX_NEAR * wmax) {
+            double B = 0.5 * std::fabs(wa - wb);
+            double lo = dist - A; if (lo < 0) lo = 0;
+            if (fold) return Gcirc(dist + A, circ_len) - Gcirc(dist + B, circ_len) - Gcirc(dist - B, circ_len) + Gcirc(lo, circ_len);
+            return Gfun(dist + A) - Gfun(dist + B) - Gfun(dist - B) + Gfun(lo);
+        }
+        return wa * wb * (dist > maxval ? maxval_density * maxval / dist : density(dist, hint));
+    }
+
     // distance_density(dist) for dist > 0
     inline double density(double dist, R_xlen_t &hint) const {
         double ldist = std::log(dist);
@@ -91,22 +236,17 @@ struct DistModel {
         return std::exp(out);
     }
 
-    // value of one local pixel with width product wp at distance dist, as in simulate_map():
-    // returns false when dist == 0 in the Hi-C model (diagonal: diag_spline, filled by the caller).
-    // NA distances give 0.
-    inline bool value(double wp, double dist, double &v, R_xlen_t &hint) const {
+    // value of the local pixel between tiles of widths wa, wb at midpoint distance dist, as in simulate_map():
+    // Hi-C pixel-integrated (dist > 0; circ_len > 0 on a circular walk, see pixel()); returns false when dist == 0 in
+    // the Hi-C model (diagonal: diag_spline, filled by the caller). NA distances give 0.
+    inline bool value(double wa, double wb, double dist, double &v, R_xlen_t &hint, double circ_len = 0) const {
         if (std::isnan(dist)) { v = 0; return true; }
         if (model_type == 0) {
-            if (dist > 0) {
-                if (dist > maxval) v = wp * maxval_density * maxval / dist;
-                else v = wp * density(dist, hint);
-            } else if (dist == 0) {
-                return false;
-            } else {
-                v = 0;  // negative distances do not occur (abs())
-            }
+            if (dist > 0) v = pixel(wa, wb, dist, hint, circ_len);
+            else if (dist == 0) return false;
+            else v = 0;  // negative distances do not occur (abs())
         } else {
-            v = wp / lr_denom * std::exp(-dist / model);
+            v = wa * wb / lr_denom * std::exp(-dist / model);
         }
         if (std::isnan(v)) v = 0;
         return true;
@@ -162,6 +302,29 @@ DataFrame make_template_dat_cpp(DataFrame A) {
     }
     return DataFrame::create(_["i"] = iv, _["j"] = jv, _["value"] = val,
                              _["widthprod"] = wp, _["id"] = id);
+}
+
+//' Pixel-integrated Hi-C kernel between tiles of widths wa, wb at midpoint distance dist (> 0; the shorter-way distance on a
+//' circular walk of length circ_len > 0, 0 = linear). Kernel hook (simulate_map(), tests, model training).
+// [[Rcpp::export]]
+NumericVector forward_pixel_cpp(NumericVector wa, NumericVector wb, NumericVector dist, List z, double lmin, double slope,
+                                double maxval, double maxval_density, double circ_len = 0) {
+    DistModel m(z, lmin, slope, maxval, maxval_density, 0, 1);
+    NumericVector out(dist.size());
+    R_xlen_t hint = 0;
+    for (R_xlen_t k = 0; k < dist.size(); ++k) { double v; m.value(wa[k], wb[k], dist[k], v, hint, circ_len); out[k] = v; }
+    return out;
+}
+
+//' Cumulative integrals of the Hi-C point density rho (power law below the first knot, spline, 1/d tail above maxval):
+//' F(s) = int_{s0}^{s} rho and G(s) = int_{s0}^{s} F, s0 = exp(lmin); the kernel's pixel integral is built from G.
+//' Used by conserve_model() (R/conserve.R).
+// [[Rcpp::export]]
+List forward_FG_cpp(NumericVector s, List z, double lmin, double slope, double maxval, double maxval_density) {
+    DistModel m(z, lmin, slope, maxval, maxval_density, 0, 1);
+    NumericVector F(s.size()), G(s.size());
+    for (R_xlen_t k = 0; k < s.size(); ++k) { F[k] = m.Ffun(s[k]); G[k] = m.Gfun(s[k]); }
+    return List::create(_["F"] = F, _["G"] = G);
 }
 
 //' distance_density() in C++ (kernel test hook)
@@ -248,7 +411,7 @@ NumericVector forward_walks_cpp(IntegerVector walk_ptr, IntegerVector orig, Nume
                 else if (p < q) { id = pix0(p, q, n_ref); mult = 1.0; }
                 else { id = pix0(q, p, n_ref); mult = 1.0; }
                 double v;
-                if (m.value(wp, dist, v, hint)) {
+                if (m.value(wa, width[r0 + b], dist, v, hint, circ ? totl : 0)) {
                     acc[id] += cw * (mult * v);
                 } else {
                     df.id.push_back(id); df.wp.push_back(wp); df.mult.push_back(cw * mult);
@@ -286,12 +449,12 @@ List forward_assemble_cpp(NumericVector width, NumericVector cn, NumericVector a
     return out;
 }
 
-//' simulate_diploid_map() values (Hi-C model) in pixel-id order, before is.na and depth:
-//' 2 * the single-copy map on same-chromosome pixels, plus the interchromosomal term if asked.
+//' simulate_diploid_map() cis values (Hi-C model) in pixel-id order, at depth 1: 2 * the single-copy map on
+//' same-chromosome pixels, NaN -> 0. The trans term and the depth are added by forward_assemble_cpp().
 // [[Rcpp::export]]
 NumericVector forward_diploid_cpp(IntegerVector chrom, NumericVector mid, NumericVector width,
                                   List z, double lmin, double slope, double maxval, double maxval_density,
-                                  bool interchr, double rho, double depth, Function diagf) {
+                                  Function diagf) {
     DistModel m(z, lmin, slope, maxval, maxval_density, 0, 1);
     int64_t l = width.size();
     int64_t P = l * (l + 1) / 2;
@@ -308,22 +471,13 @@ NumericVector forward_diploid_cpp(IntegerVector chrom, NumericVector mid, Numeri
             double dist = std::fabs(mid[j] - mid[i]);
             if (std::isnan(dist)) continue;
             if (dist > 0) {
-                if (dist > maxval) out[k] = 2 * wp * maxval_density * maxval / dist;
-                else out[k] = 2 * wp * m.density(dist, hint);
+                out[k] = 2 * m.pixel(width[i], width[j], dist, hint);
             } else if (dist == 0) {
                 df.id.push_back(k); df.wp.push_back(wp); df.mult.push_back(2.0);
             }
         }
     }
     apply_deferred(df, diagf, out);
-    k = 0;
-    for (int64_t i = 0; i < l; ++i) {
-        for (int64_t j = i; j < l; ++j, ++k) {
-            double v = out[k];
-            if (interchr) v = v + width[i] * width[j] * rho * 4;
-            if (std::isnan(v)) v = 0;
-            out[k] = depth * v;
-        }
-    }
+    for (int64_t k2 = 0; k2 < P; ++k2) if (std::isnan(out[k2])) out[k2] = 0;
     return outv;
 }

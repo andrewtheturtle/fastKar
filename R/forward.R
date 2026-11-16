@@ -8,14 +8,15 @@
 #' @param if.comps boolean setting whether or not to simulate compartments (defaults to FALSE)
 #' @param mc.cores accepted for compatibility (defaults to 1). The walk kernel runs single-threaded in C++, where forking over walks costs more than it saves; results do not depend on it. Parallelize over candidates instead.
 #' @param if.sum boolean deciding whether to sum the simulated Hi-C signal from all walks or whether to return a list of Hi-C maps (defaults to TRUE)
-#' @param depth depth of the simulated Hi-C data, in X coverage (defaults to 1)
+#' @param depth Hi-C depth as returned by estimate.depthratio() (defaults to 1); halved here to the per-haploid-copy depth that simulate_walks() and simulate_diploid_map() take
 #' @param purity tumor purity/fraction of the sample explained by the supplied walks (defaults to 1). If less than 1, the remaining fraction is simulated as a diploid reference genome over the same context and added to the tumor simulation.
 #' @param model sets whether to simulate Hi-C (model = 0) or long-read data (model = length of reads in bp)
 #' @param if.interchr boolean, sets whether to simulate interchromosomal contacts (default is TRUE). If if.sum = FALSE, then this is set to FALSE. 
 #' @param gm.out boolean, chooses whether to return a gMatrix or a data.table (defaults to TRUE, returning a gMatrtix)
 #' @param prepped optional result of prep_for_sim() for this graph, target_region and pix.size, reused instead of tiling again (target_region, pix.size and if.comps are then not used for tiling)
+#' @param conserve use the contact-conserving trans term (R/conserve.R): every copy-bp has the same total contacts, so copies that lose cis (circles, short walks, walk ends) get more trans. Default getOption('fastKar.conserve', FALSE)
 #' @return either a gMatrix (gm.out = if.sum = T), a list of gMatrices (gm.out = T, if.sum = F), a data.table (gm.out = F, if.sum = T), or a list of data.tables (gm.out = if.sum = F)
-forward_simulate <- function(walks,target_region = NULL,pix.size=1e5,if.comps=FALSE,mc.cores=1,if.sum=TRUE,depth=1,purity=1,model=0,if.interchr=T,gm.out=T,prepped=NULL){
+forward_simulate <- function(walks,target_region = NULL,pix.size=1e5,if.comps=FALSE,mc.cores=1,if.sum=TRUE,depth=1,purity=1,model=0,if.interchr=T,gm.out=T,prepped=NULL,conserve=getOption('fastKar.conserve',FALSE)){
     if (!is.numeric(purity) || length(purity) != 1 || is.na(purity) || purity < 0 || purity > 1){
         stop('purity must be a single numeric value between 0 and 1')
     }
@@ -30,10 +31,11 @@ forward_simulate <- function(walks,target_region = NULL,pix.size=1e5,if.comps=FA
         prepped.data = prepped
     }
     if (purity == 1){
-        return(simulate_walks(walks,prepped.data$tiled.target,prepped.data$widthdt,if.comps,mc.cores,if.sum,haploid.depth,model,if.interchr,gm.out))
+        return(simulate_walks(walks,prepped.data$tiled.target,prepped.data$widthdt,if.comps,mc.cores,if.sum,haploid.depth,model,if.interchr,gm.out,conserve=conserve))
     }
-    tumor.sim = simulate_walks(walks,prepped.data$tiled.target,prepped.data$widthdt,if.comps,mc.cores,TRUE,haploid.depth*purity,model,if.interchr,F)
-    normal.sim = simulate_diploid_map(prepped.data$tiled.target,if.comps=if.comps,depth=haploid.depth*(1-purity),model=model,if.interchr=if.interchr,gm.out=F)
+    tumor.sim = simulate_walks(walks,prepped.data$tiled.target,prepped.data$widthdt,if.comps,mc.cores,TRUE,haploid.depth*purity,model,if.interchr,F,conserve=conserve)
+    normal.sim = simulate_diploid_map(prepped.data$tiled.target,if.comps=if.comps,depth=haploid.depth*(1-purity),model=model,if.interchr=if.interchr,gm.out=F,
+                                      conserve=conserve,seqlengths=GenomeInfoDb::seqlengths(walks$graph$gr))
     if (identical(normal.sim$dat$id, tumor.sim$dat$id) && !is.unsorted(tumor.sim$dat$id, strictly = TRUE)){
         # both maps on the same template, in pixel id order: add the value vectors
         combined.dat = normal.sim$dat[,.(i,j,id)]
@@ -150,12 +152,13 @@ double_samelocus_pixels <- function(dat, tiled.target){
 #' @param if.comps boolean setting whether or not to simulate compartments (defaults to FALSE)
 #' @param mc.cores accepted for compatibility (defaults to 1). The walk kernel runs single-threaded in C++, where forking over walks costs more than it saves; results do not depend on it. Parallelize over candidates instead.
 #' @param if.sum boolean deciding whether to sum the simulated Hi-C signal from all walks or whether to return a list of Hi-C maps (defaults to TRUE)
-#' @param depth depth of the simulated Hi-C data, in X coverage (defaults to 1)
+#' @param depth per-haploid-copy depth, i.e. estimate.depthratio() / 2 (forward_simulate() halves its depth before calling); defaults to 1
 #' @param model sets whether to simulate Hi-C (model = 0) or long-read data (model = length of reads in bp)
 #' @param if.interchr boolean, sets whether to simulate interchromosomal contacts (default is TRUE). If if.sum = FALSE, then this is set to FALSE. 
 #' @param gm.out boolean, chooses whether to return a gMatrix or a data.table (defaults to TRUE, returning a gMatrtix)
+#' @param conserve contact-conserving trans term (trans_weights() replaces the tile CN in the trans term); default getOption('fastKar.conserve', FALSE)
 #' @return either a gMatrix (gm.out = if.sum = T), a list of gMatrices (gm.out = T, if.sum = F), a data.table (gm.out = F, if.sum = T), or a list of data.tables (gm.out = if.sum = F)
-simulate_walks <- function(walks,tiled.target,widthdt,if.comps=F,mc.cores=1,if.sum=T,depth=1,model=0,if.interchr=T,gm.out=T){
+simulate_walks <- function(walks,tiled.target,widthdt,if.comps=F,mc.cores=1,if.sum=T,depth=1,model=0,if.interchr=T,gm.out=T,conserve=getOption('fastKar.conserve',FALSE)){
     # walks is either a gWalk object or a list with elements: snode.id, circular
     # tiled.target is a gr2dt with metadata columns of tile.id, node.id, and cn
     # mc.cores is accepted for compatibility; the C++ kernel is single-threaded and results do not depend on it.
@@ -190,10 +193,11 @@ simulate_walks <- function(walks,tiled.target,widthdt,if.comps=F,mc.cores=1,if.s
     if(if.sum){
         acc = walk_acc(seq_along(walk.cn), walk.cn)
         interchr = if.interchr & model==0
-        total.counts = setDT(forward_assemble_cpp(as.numeric(tiled.target$width), as.numeric(tiled.target$cn), acc, depth,
+        trans.cn = if (interchr && isTRUE(conserve)) trans_weights(walks, tiled.target, widthdt)$B else tiled.target$cn
+        total.counts = setDT(forward_assemble_cpp(as.numeric(tiled.target$width), as.numeric(trans.cn), acc, depth,
                                                   fastKar::interchrom_density, interchr))
         if (interchr){
-            setattr(total.counts,'sorted','id') # calculate_interchrom() returned a table keyed by id
+            setattr(total.counts,'sorted','id') # downstream code expects the summed map keyed by id
         }
         double_samelocus_pixels(total.counts, tiled.target)
         if (gm.out){
@@ -329,6 +333,7 @@ distance_density = function(dist){
 #' @return data.table of long-format gMatrix with columns i,j,id,value
 simulate_map<-  function(walk.dt,is.circular=FALSE,model=0){
     dat.new = as.data.table(make_template_dat_cpp(walk.dt))
+    totl = 0 # circle length for the folded pixel integral (0 = linear)
     if (is.circular){
         totl = walk.dt$end[nrow(walk.dt)]
         dat.new[,dist_temp:= abs(walk.dt$mid[j]-walk.dt$mid[i])]
@@ -337,11 +342,9 @@ simulate_map<-  function(walk.dt,is.circular=FALSE,model=0){
         dat.new[,dist:= abs(walk.dt$mid[j]-walk.dt$mid[i])]
     }
     if(model==0){
-        maxval = 1e8
-        maxval_density = distance_density(maxval) #density at maximum cutoff
-        dat.new[dist>0,value:=widthprod*distance_density(dist)]
+        ka = forward_kernel_args(0) # pixel-integrated kernel (as the C++ kernels), 1/distance beyond 1e8
+        dat.new[dist>0,value:=forward_pixel_cpp(walk.dt$width[i], walk.dt$width[j], dist, ka$z, ka$lmin, ka$slope, ka$maxval, ka$maxval_density, totl)]
         dat.new[dist==0,value:=exp(fastKar::splineobj$diag_spline(log(widthprod)))]
-        dat.new[dist>maxval,value:=widthprod*maxval_density*maxval/dist] #assume 1/distance scaling for values > 1e8
    }else {
         min.res = min(fastKar::small_lookup[d>0]$d)
         dat.new[,value:=widthprod/(10*min.res^2)*(exp(-dist/model))]
@@ -370,68 +373,6 @@ eval_comps <- function(tiled.walk,comps.gr=NULL){
     compartment = ifelse(afrac > 0.5 & bfrac < 0.5, 'A', ifelse(afrac < 0.5 & bfrac > 0.5, 'B', NA))
     tiled.walk$compartment = compartment
     return(tiled.walk)
-}
-
-#' Calculate inter-chromosomal contacts given walks using one-shot formula
-#' 
-#' @param intra.dts list of data.tables of intra-chromosomal contacts for each walk, generated by simulate_map
-#' @param walk.dts list of data.tables corresponding to each walk, with at least one column orig.id
-#' @param tiled.target data.table of target region tiles and their coordinates, given by prep_for_sim()
-#' @param walk.cn array giving the CN of each walk in walk.dts
-#' @param if.comps boolean, whether or not to consider compartments (defaults to FALSE)
-#' @return single data.table corresponding to the total contacts in the target region including both intra- and inter-chromosomal contacts
-calculate_interchrom <- function(intra.dts,walk.dts,tiled.target,walk.cn,if.comps=F,mc.cores=1,if.fast=T){
-    template = intra.dts[[1]]
-    if (!if.comps && same_pixels(intra.dts) && !is.unsorted(template$id, strictly = TRUE)){
-        # all maps on one template: plain vector sums, no merge
-        raw_density = fastKar::interchrom_density
-        cn = tiled.target$cn
-        intra = Reduce(`+`, lapply(intra.dts, `[[`, 'value'))
-        out = template[,.(i,j,id)]
-        setattr(out,'sorted',NULL)
-        out[,value:=intra + template$widthprod*raw_density*(cn[i]*cn[j])]
-        setkeyv(out,'id')
-        return(out)
-    }
-    target.dt = data.table::copy(tiled.target)[,.(orig.id=tile.id,cn,compartment)]
-    template = data.table::copy(intra.dts[[1]])
-    if (if.comps){
-        lookup_interchr = fastKar::small_lookup[d<0]
-        template[,raw_density:=lookup_interchr[interaction==this.interaction]$tot_density/1500,by=this.interaction]
-    }else{
-        raw_density= fastKar::interchrom_density
-    }
-    # use one-shot calculation formula: n_ij = rate * widthprod * (CN_i*CN_j)
-    mydat = data.table::copy(template)[,titj:=target.dt$cn[i]*target.dt$cn[j]] 
-    mydat[,value:=widthprod*raw_density*(titj)] #can subtract sum_sisj if no inter-contacts among same chrom nodes
-    intra_sum = sum_matrices(intra.dts)
-    combdat = merge.data.table(mydat[,.(inter_value=value,id)],intra_sum[,.(i,j,intra_value=value,id)],by='id',allow.cartesian=T)[,value:=intra_value+inter_value]
-    return(combdat[,.(i,j,id,value)])
-}
-
-#' TRUE if every table in a list has the same pixel ids, in the same order, with no duplicates
-same_pixels = function(matrices){
-    id1 = matrices[[1]]$id
-    if (anyDuplicated(id1)) return(FALSE)
-    all(vapply(matrices, function(m) identical(m$id, id1), logical(1)))
-}
-
-#' Sums the contacts coming from many gMatrix data.tables as fast as possible using the 'id' column. 
-#' 
-#' @param matrices list of data.tables of long-form gMatrices with columns i,j,id,value
-#' @return single data.table with same columns, with value column corresponding to the sum of all inputs for a given id
-sum_matrices <- function(matrices){
-    if (same_pixels(matrices)){
-        # all maps on one template: add the value vectors
-        outmat = matrices[[1]][,.(i,j,id)]
-        setattr(outmat,'sorted',NULL)
-        outmat[,value:=Reduce(`+`, lapply(matrices, `[[`, 'value'))]
-        return(outmat)
-    }
-    allmats = do.call(rbind,matrices)
-    allmats[,sumval:=sum(value),by='id']
-    outmat = unique(allmats[,.(i,j,id,value = sumval)])
-    return(outmat)
 }
 
 #' Given a set of bins, make the gMatrix data.table corresponding to all pairwise contacts for those bins
@@ -470,12 +411,14 @@ symmetrize <- function(input.mat){
 #'
 #' @param tiled.target data.table produced by prep_for_sim(), containing at least start, end, seqnames, width, and tile.id columns
 #' @param if.comps boolean setting whether or not to simulate compartments (currently unsupported)
-#' @param depth depth multiplier, matching simulate_walks()
-#' @param model sets whether to simulate Hi-C (model = 0) or long-read data (model = read length in bp)
-#' @param if.interchr boolean, whether to add the same interchromosomal/background term as calculate_interchrom()
+#' @param depth per-haploid-copy depth, i.e. estimate.depthratio() / 2, as in simulate_walks()
+#' @param model 0 (Hi-C); long-read models (model > 0) are not supported here, so forward_simulate() with purity < 1 needs model = 0
+#' @param if.interchr boolean, whether to add the same interchromosomal/background term as simulate_walks()
 #' @param gm.out boolean, chooses whether to return a gMatrix or a list with gr/dat data.tables
+#' @param conserve contact-conserving trans term (reference_trans_weights() in place of CN 2); default getOption('fastKar.conserve', FALSE)
+#' @param seqlengths optional chromosome lengths for the reference positions under conserve (else hg38 calibration lengths)
 #' @return either a gMatrix or a list with tiled target and contact data.table
-simulate_diploid_map = function(tiled.target,if.comps=FALSE,depth=1,model=0,if.interchr=TRUE,gm.out=TRUE){
+simulate_diploid_map = function(tiled.target,if.comps=FALSE,depth=1,model=0,if.interchr=TRUE,gm.out=TRUE,conserve=getOption('fastKar.conserve',FALSE),seqlengths=NULL){
     if (missing(tiled.target) || is.null(tiled.target)){
         stop('tiled.target must be supplied for direct diploid simulation')
     }
@@ -494,26 +437,19 @@ simulate_diploid_map = function(tiled.target,if.comps=FALSE,depth=1,model=0,if.i
     tiled.target[,compartment:='A']
 
     if (model == 0){
-        # C++: same-chromosome Hi-C model x 2, interchromosomal term, NA -> 0, depth
+        # C++: same-chromosome Hi-C model x 2 (cis), then the trans term and depth as in simulate_walks(): per-tile
+        # trans weight 2 (CN), or the reference weights of the conserved trans term
         chrom = match(as.character(tiled.target$seqnames), unique(as.character(tiled.target$seqnames)))
         chrom[is.na(tiled.target$seqnames)] = NA_integer_
         kern = forward_kernel_args(0)
-        value = forward_diploid_cpp(as.integer(chrom), as.numeric((tiled.target$start+tiled.target$end)/2), as.numeric(tiled.target$width),
-                                    kern$z, kern$lmin, kern$slope, kern$maxval, kern$maxval_density,
-                                    if.interchr, fastKar::interchrom_density, depth, kern$diagf)
-        out.dat = setDT(forward_assemble_cpp(as.numeric(tiled.target$width), numeric(0), value, 1, 0, FALSE))
+        cis = forward_diploid_cpp(as.integer(chrom), as.numeric((tiled.target$start+tiled.target$end)/2), as.numeric(tiled.target$width),
+                                  kern$z, kern$lmin, kern$slope, kern$maxval, kern$maxval_density, kern$diagf)
+        trans.cn = if (if.interchr && isTRUE(conserve)) reference_trans_weights(tiled.target, seqlengths) else tiled.target$cn
+        out.dat = setDT(forward_assemble_cpp(as.numeric(tiled.target$width), as.numeric(trans.cn), cis, depth,
+                                             fastKar::interchrom_density, if.interchr))
     } else{
-        # reference code path (errors: same_chrom is looked up as a variable by data.table)
-        out.dat = as.data.table(make_template_dat_cpp(tiled.target))
-        tiled.target[,mid:=(start+end)/2]
-        out.dat[,same_chrom:=tiled.target$seqnames[i]==tiled.target$seqnames[j]]
-        out.dat[,dist:=abs(tiled.target$mid[j]-tiled.target$mid[i])]
-        min.res = min(fastKar::small_lookup[d>0]$d)
-        out.dat[same_chrom,value:=2*widthprod/(10*min.res^2)*(exp(-dist/model))]
-        out.dat[is.na(value),value:=0]
-        out.dat[,value:=depth*value]
-        out.dat = out.dat[,.(i,j,id,value)]
-        tiled.target[,mid:=NULL]
+        # long-read diploid path removed 2026-11-16 (user; it errored at the same_chrom lookup); restore if needed
+        stop('simulate_diploid_map: only the Hi-C model (model = 0) is supported; long-read diploid simulation (purity < 1 with model > 0) is not implemented')
     }
 
     if (gm.out){

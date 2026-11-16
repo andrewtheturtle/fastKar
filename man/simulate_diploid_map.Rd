@@ -10,7 +10,9 @@ simulate_diploid_map(
   depth = 1,
   model = 0,
   if.interchr = TRUE,
-  gm.out = TRUE
+  gm.out = TRUE,
+  conserve = getOption("fastKar.conserve", FALSE),
+  seqlengths = NULL
 )
 }
 \arguments{
@@ -18,13 +20,17 @@ simulate_diploid_map(
 
 \item{if.comps}{boolean setting whether or not to simulate compartments (currently unsupported)}
 
-\item{depth}{depth multiplier, matching simulate_walks()}
+\item{depth}{per-haploid-copy depth, i.e. estimate.depthratio() / 2, as in simulate_walks()}
 
-\item{model}{sets whether to simulate Hi-C (model = 0) or long-read data (model = read length in bp)}
+\item{model}{0 (Hi-C); long-read models (model > 0) are not supported here, so forward_simulate() with purity < 1 needs model = 0}
 
-\item{if.interchr}{boolean, whether to add the same interchromosomal/background term as calculate_interchrom()}
+\item{if.interchr}{boolean, whether to add the same interchromosomal/background term as simulate_walks()}
 
 \item{gm.out}{boolean, chooses whether to return a gMatrix or a list with gr/dat data.tables}
+
+\item{conserve}{contact-conserving trans term (reference_trans_weights() in place of CN 2); default getOption('fastKar.conserve', FALSE)}
+
+\item{seqlengths}{optional chromosome lengths for the reference positions under conserve (else hg38 calibration lengths)}
 }
 \value{
 either a gMatrix or a list with tiled target and contact data.table

@@ -33,6 +33,19 @@ make_template_dat_cpp <- function(A) {
     .Call(`_fastKar_make_template_dat_cpp`, A)
 }
 
+#' Pixel-integrated Hi-C kernel between tiles of widths wa, wb at midpoint distance dist (> 0; the shorter-way distance on a
+#' circular walk of length circ_len > 0, 0 = linear). Kernel hook (simulate_map(), tests, model training).
+forward_pixel_cpp <- function(wa, wb, dist, z, lmin, slope, maxval, maxval_density, circ_len = 0) {
+    .Call(`_fastKar_forward_pixel_cpp`, wa, wb, dist, z, lmin, slope, maxval, maxval_density, circ_len)
+}
+
+#' Cumulative integrals of the Hi-C point density rho (power law below the first knot, spline, 1/d tail above maxval):
+#' F(s) = int_{s0}^{s} rho and G(s) = int_{s0}^{s} F, s0 = exp(lmin); the kernel's pixel integral is built from G.
+#' Used by conserve_model() (R/conserve.R).
+forward_FG_cpp <- function(s, z, lmin, slope, maxval, maxval_density) {
+    .Call(`_fastKar_forward_FG_cpp`, s, z, lmin, slope, maxval, maxval_density)
+}
+
 #' distance_density() in C++ (kernel test hook)
 forward_density_cpp <- function(dist, z, lmin, slope) {
     .Call(`_fastKar_forward_density_cpp`, dist, z, lmin, slope)
@@ -56,10 +69,10 @@ forward_assemble_cpp <- function(width, cn, acc, depth, rho, interchr) {
     .Call(`_fastKar_forward_assemble_cpp`, width, cn, acc, depth, rho, interchr)
 }
 
-#' simulate_diploid_map() values (Hi-C model) in pixel-id order, before is.na and depth:
-#' 2 * the single-copy map on same-chromosome pixels, plus the interchromosomal term if asked.
-forward_diploid_cpp <- function(chrom, mid, width, z, lmin, slope, maxval, maxval_density, interchr, rho, depth, diagf) {
-    .Call(`_fastKar_forward_diploid_cpp`, chrom, mid, width, z, lmin, slope, maxval, maxval_density, interchr, rho, depth, diagf)
+#' simulate_diploid_map() cis values (Hi-C model) in pixel-id order, at depth 1: 2 * the single-copy map on
+#' same-chromosome pixels, NaN -> 0. The trans term and the depth are added by forward_assemble_cpp().
+forward_diploid_cpp <- function(chrom, mid, width, z, lmin, slope, maxval, maxval_density, diagf) {
+    .Call(`_fastKar_forward_diploid_cpp`, chrom, mid, width, z, lmin, slope, maxval, maxval_density, diagf)
 }
 
 reads_fromwalk_cpp <- function(widths, lens, circular, readL, fwd_tok, rev_tok, keep) {

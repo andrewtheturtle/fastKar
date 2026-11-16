@@ -68,13 +68,14 @@ test_that('kernel lift reproduces the dense t(T) S T on hand-built walks (Hi-C a
     for (nm in names(lift_cases)) {
         cs = lift_cases[[nm]]
         for (model in c(0, 1e5)) {
+            inf = paste(nm, model)
             expected = dense_lift(cs$orig, cs$width, cs$circ, model, cs$n_ref)
             got = kernel_walks(list(cs$orig), list(cs$width), cs$circ, 1, cs$n_ref, model)
             expect_length(got, cs$n_ref * (cs$n_ref + 1) / 2)
-            expect_equal(got, expected, tolerance = 1e-13, info = paste(nm, model))
+            expect_equal(got, expected, tolerance = 1e-13, info = inf)
             ## walk CN multiplies
             got3 = kernel_walks(list(cs$orig), list(cs$width), cs$circ, 3, cs$n_ref, model)
-            expect_equal(got3, 3 * expected, tolerance = 1e-13, info = paste(nm, model, 'cn'))
+            expect_equal(got3, 3 * expected, tolerance = 1e-13, info = paste(inf, 'cn'))
         }
     }
 })
@@ -87,6 +88,45 @@ test_that('revisits mapping to one tile add 2 L_ab to the diagonal pixel', {
     loc = simulate_map(walk.dt)
     want = sum(loc[i == j]$value) + 2 * loc[i == 1 & j == 2]$value
     expect_equal(kernel_walks(list(orig), list(width), FALSE, 1, 1), want, tolerance = 1e-14)
+})
+
+## reference pixel integral: int rho(s) T(s) ds, T = overlap of tiles wa, wb at separation s (trapezoid around d),
+## composite Simpson in log s on each smooth piece (1e-3 bp lower limit for touching tiles: T ~ s there)
+pixel_quadrature = function(wa, wb, d, ka) {
+    rho = function(s) {
+        out = distance_density(pmin(s, ka$maxval))
+        hi = s > ka$maxval
+        out[hi] = ka$maxval_density * ka$maxval / s[hi]
+        out
+    }
+    A = (wa + wb) / 2; B = abs(wa - wb) / 2
+    Tw = function(s) pmax(0, pmin(min(wa, wb), A - abs(s - d)))
+    br = sort(unique(c(max(d - A, 1e-3), d - B, d + B, d + A, exp(ka$lmin), ka$maxval)))
+    br = br[br >= max(d - A, 1e-3) & br <= d + A]
+    tot = 0
+    for (k in seq_len(length(br) - 1)) {
+        u = seq(log(br[k]), log(br[k + 1]), length.out = 20001); h = diff(u[1:2])
+        s = exp(u); y = rho(s) * Tw(s) * s
+        tot = tot + h / 3 * (y[1] + y[20001] + 4 * sum(y[seq(2, 20000, 2)]) + 2 * sum(y[seq(3, 19999, 2)]))
+    }
+    tot
+}
+
+test_that('pixel-integrated kernel matches quadrature; beyond 20 widths it is the midpoint value', {
+    ka = kernel_args()
+    cases = list(c(1e4, 1e4), c(1e6, 1e6), c(3.7e4, 1e6), c(5e6, 2e5), c(5e7, 5e7))
+    for (w in cases) {
+        wa = w[1]; wb = w[2]; wm = max(w)
+        d = (wa + wb) / 2 * c(1, 1.5, 3)            # touching and near
+        d = c(d, wm * c(10, 19.9, 20.1, 50))        # both sides of the exact / midpoint switch (20 widths)
+        got = forward_pixel_cpp(rep(wa, length(d)), rep(wb, length(d)), d, ka$z, ka$lmin, ka$slope, ka$maxval, ka$maxval_density)
+        ref = sapply(d, function(x) pixel_quadrature(wa, wb, x, ka))
+        exact = d < 20 * wm
+        expect_lte(max(abs(got[exact] / ref[exact] - 1)), 1e-3, label = paste('exact', wa, wb))
+        expect_lte(max(abs(got[!exact] / ref[!exact] - 1)), 1e-2, label = paste('midpoint zone', wa, wb))
+        mid = ifelse(d > ka$maxval, ka$maxval_density * ka$maxval / d, distance_density(pmin(d, ka$maxval))) * wa * wb
+        expect_equal(got[!exact], mid[!exact], tolerance = 1e-13)
+    }
 })
 
 test_that('kernel sums several walks with their CNs and is additive over walks', {

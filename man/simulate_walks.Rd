@@ -14,7 +14,8 @@ simulate_walks(
   depth = 1,
   model = 0,
   if.interchr = T,
-  gm.out = T
+  gm.out = T,
+  conserve = getOption("fastKar.conserve", FALSE)
 )
 }
 \arguments{
@@ -30,13 +31,15 @@ simulate_walks(
 
 \item{if.sum}{boolean deciding whether to sum the simulated Hi-C signal from all walks or whether to return a list of Hi-C maps (defaults to TRUE)}
 
-\item{depth}{depth of the simulated Hi-C data, in X coverage (defaults to 1)}
+\item{depth}{per-haploid-copy depth, i.e. estimate.depthratio() / 2 (forward_simulate() halves its depth before calling); defaults to 1}
 
 \item{model}{sets whether to simulate Hi-C (model = 0) or long-read data (model = length of reads in bp)}
 
 \item{if.interchr}{boolean, sets whether to simulate interchromosomal contacts (default is TRUE). If if.sum = FALSE, then this is set to FALSE.}
 
 \item{gm.out}{boolean, chooses whether to return a gMatrix or a data.table (defaults to TRUE, returning a gMatrtix)}
+
+\item{conserve}{contact-conserving trans term (trans_weights() replaces the tile CN in the trans term); default getOption('fastKar.conserve', FALSE)}
 }
 \value{
 either a gMatrix (gm.out = if.sum = T), a list of gMatrices (gm.out = T, if.sum = F), a data.table (gm.out = F, if.sum = T), or a list of data.tables (gm.out = if.sum = F)
