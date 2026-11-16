@@ -21,44 +21,22 @@ def sum_energy(values, t):
     return sum(values)
 
 
-def optimize(g, terms, energy=None, T=1.0, chains=16, steps=20000, block=500, seed=0, init=None, init_random=0,
-             t0=None, history_every=0, topk=1, vmap=False, log=print):
-    """Metropolis search over wirings of g minimising energy(values, t); values = tuple of the terms' values.
-    terms: Term or plain f(kar) -> scalar (jittable), a list of them. energy: (values, t) -> scalar, jittable, t = global
-    step (traced); default sum(values). Each step the energy of the current and the proposed state are both computed at
-    the current t. Accept if dE < 0 or log u < -dE / T. At every block boundary every term is re-initialised from scratch.
-    T: scalar (all chains); 1-D array of length chains (ladder = parallel tempering: adjacent-rung swaps after every block,
-    even/odd alternating); or a jittable callable t -> (chains,) array (annealing; swaps use T at the block end). T = 0 is greedy.
-    init: None (random), list/array of b (round robin; last init_random chains random) or a previous Result (continue; use a
-    new seed; t0 defaults to its t_end). Per-chain loop over one jitted block function; vmap=True vmaps it over chains.
-    Returns a dict (Result): b (chains, n), rung, E, values (nterms, chains), t_end, best (E, b, values), top (list of (E, b)
-    sorted: best + the 2*topk lowest-E states per chain, see
-    problem.distinct_karyotypes), history (dict of arrays: step, chain, T, E, v0..), trace (dict: steps, best, cur (nblk, chains
-    by rung)), summary."""
-    C = chains
-    terms = [as_term(f) for f in (terms if isinstance(terms, (list, tuple)) and not isinstance(terms, Term) else [terms])]
-    energy = energy or sum_energy
-    ladder = callable(T) or np.ndim(T) == 1
-    if not callable(T):
-        T = (lambda Ta: lambda t: Ta)(jnp.asarray(np.broadcast_to(np.asarray(T, float), (C,))))
-    prev = init if isinstance(init, dict) else None
-    if t0 is None:
-        t0 = int(prev['t_end']) if prev else 0
-    Tat = lambda t: np.asarray(T(t), float)  # host: T per rung at step t
+# Compiled functions reused across optimize() calls (a new jax.jit per call recompiles every time: ~20 s on a 487-bin problem,
+# ~130 s at 2912 bins). Key = identities of g, the terms, energy and a callable T, plus block / topk buffer / vmap / whether params
+# are used; the value keeps those objects alive so their ids cannot be reused by other objects.
+_JIT = {}
 
-    start = jax.jit(lambda b: tuple(tm.init(kar(g, b)) for tm in terms))
+
+def _compiled(g, terms_in, energy, T, block, K, vmap, use_p):
+    key = (id(g), tuple(map(id, terms_in)), id(energy), id(T) if callable(T) else None, block, K, vmap, use_p)
+    if key in _JIT:
+        return _JIT[key][0]
+    terms = [as_term(f) for f in terms_in]
+    Ef = energy if use_p else (lambda v, t, p: energy(v, t))
+    Tf = T if callable(T) else None
     vals_of = lambda aux: tuple(tm.value(a) for tm, a in zip(terms, aux))
-    if len(g.vnodes) == 0:
-        b = jnp.zeros(0, int); v = vals_of(start(b)); E = float(energy(v, t0))
-        summ = dict(chains=C, steps=0, block=block, best_E=E, n_var_nodes=0, n_moves=0, wall_s=0.0)
-        return dict(b=np.zeros((1, 0), int), rung=np.zeros(1, int), E=np.array([E]), values=np.array([[float(x)] for x in v]),
-                    t_end=t0, best=dict(E=E, b=np.zeros(0, int), values=[float(x) for x in v]), top=[(E, np.zeros(0, int))],
-                    history={}, trace={}, summary=summ)
-
-    nb = max(steps // block, 1)
     moves = jnp.asarray(g.moves); mnode = g.move_node; n_nodes = len(g.vnodes)
     off = jnp.asarray(np.searchsorted(mnode, np.arange(n_nodes))); nmv = jnp.asarray(np.bincount(mnode, minlength=n_nodes))
-    K = 2 * topk if topk > 1 else 0
 
     def buf_insert(bn, bb, E, b):
         dup = jnp.any(jnp.abs(bn - E) <= 1e-9 * jnp.maximum(1.0, jnp.abs(E)))
@@ -66,7 +44,7 @@ def optimize(g, terms, energy=None, T=1.0, chains=16, steps=20000, block=500, se
         ins = (E < bn[w]) & ~dup
         return bn.at[w].set(jnp.where(ins, E, bn[w])), bb.at[w].set(jnp.where(ins, b, bb[w]))
 
-    def block_fn(S, key, rung, tstart):
+    def block_fn(S, key, rung, tstart, Ta, p):
         ko = kar(g, S['b'])
         def step(c, x):
             ko, aux, bE, bb, bv, acc, bufE, bufb = c
@@ -78,10 +56,11 @@ def optimize(g, terms, energy=None, T=1.0, chains=16, steps=20000, block=500, se
             kn = kar(g, b.at[i].set(b[j]).at[j].set(b[i]))
             aux2 = tuple(tm.update(a, ko, kn, i, j) for tm, a in zip(terms, aux))
             vo, vn = vals_of(aux), vals_of(aux2)
-            Eo, En = energy(vo, tt), energy(vn, tt)
+            Eo, En = Ef(vo, tt, p), Ef(vn, tt, p)
             dE = En - Eo
-            ok = (dE < 0) | (jnp.log(jax.random.uniform(k3)) < -dE / jnp.maximum(jnp.asarray(T(tt))[rung], 1e-300))
-            sel = lambda u, v: jax.tree.map(lambda p, q: jnp.where(ok, p, q), u, v)
+            Tc = (jnp.asarray(Tf(tt)) if Tf else Ta)[rung]
+            ok = (dE < 0) | (jnp.log(jax.random.uniform(k3)) < -dE / jnp.maximum(Tc, 1e-300))
+            sel = lambda u, v: jax.tree.map(lambda p_, q: jnp.where(ok, p_, q), u, v)
             ko, aux = sel(kn, ko), sel(aux2, aux)
             E, v = jnp.where(ok, En, Eo), sel(vn, vo)
             better = E < bE
@@ -96,14 +75,60 @@ def optimize(g, terms, energy=None, T=1.0, chains=16, steps=20000, block=500, se
         S2 = dict(b=ko.b, aux=aux, bE=bE, bb=bb, bv=bv, bufE=bufE, bufb=bufb)
         return S2, acc, ys
 
-    bj = jax.vmap(block_fn, in_axes=(0, 0, 0, None)) if vmap else None
-    bj = jax.jit(bj if vmap else block_fn)
+    bj = jax.jit(jax.vmap(block_fn, in_axes=(0, 0, 0, None, None, None)) if vmap else block_fn)
 
     @jax.jit
-    def reinit(S, t):  # drift control: aux from scratch; returns state, energy, values
+    def reinit(S, t, p):  # drift control: aux from scratch; returns state, energy, values
         aux = tuple(tm.init(kar(g, S['b'])) for tm in terms)
         v = vals_of(aux)
-        return dict(S, aux=aux), energy(v, t), jnp.stack(v)
+        return dict(S, aux=aux), Ef(v, t, p), jnp.stack(v)
+
+    start = jax.jit(lambda b: tuple(tm.init(kar(g, b)) for tm in terms))
+    fns = dict(terms=terms, Ef=Ef, vals_of=vals_of, buf_insert=buf_insert, bj=bj, reinit=reinit, start=start)
+    _JIT[key] = (fns, (g, terms_in, energy, T))
+    return fns
+
+
+def optimize(g, terms, energy=None, T=1.0, chains=16, steps=20000, block=500, seed=0, init=None, init_random=0,
+             t0=None, history_every=0, topk=1, vmap=False, log=print, params=None):
+    """Metropolis search over wirings of g minimising energy(values, t); values = tuple of the terms' values.
+    terms: Term or plain f(kar) -> scalar (jittable), a list of them. energy: (values, t) -> scalar, jittable, t = global
+    step (traced); default sum(values). Each step the energy of the current and the proposed state are both computed at
+    the current t. Accept if dE < 0 or log u < -dE / T. At every block boundary every term is re-initialised from scratch.
+    T: scalar (all chains); 1-D array of length chains (ladder = parallel tempering: adjacent-rung swaps after every block,
+    even/odd alternating); or a jittable callable t -> (chains,) array (annealing; swaps use T at the block end). T = 0 is greedy.
+    init: None (random), list/array of b (round robin; last init_random chains random) or a previous Result (continue; use a
+    new seed; t0 defaults to its t_end). Per-chain loop over one jitted block function; vmap=True vmaps it over chains.
+    Returns a dict (Result): b (chains, n), rung, E, values (nterms, chains), t_end, best (E, b, values), top (list of (E, b)
+    sorted: best + the 2*topk lowest-E states per chain, see
+    problem.distinct_karyotypes), history (dict of arrays: step, chain, T, E, v0..), trace (dict: steps, best, cur (nblk, chains
+    by rung)), summary.
+    params: None, or a pytree passed to the energy as energy(values, t, params) and traced (not baked into the compiled code), so
+    calls that differ only in params (a new target, mixture weights) reuse the compiled block. Compiled functions are cached across
+    calls on the identities of g, terms, energy and a callable T: pass the same objects (not new lambdas) to reuse them."""
+    C = chains
+    terms_in = list(terms) if isinstance(terms, (list, tuple)) and not isinstance(terms, Term) else [terms]
+    energy = energy or sum_energy
+    ladder = callable(T) or np.ndim(T) == 1
+    Ta = jnp.zeros(C) if callable(T) else jnp.asarray(np.broadcast_to(np.asarray(T, float), (C,)))
+    prev = init if isinstance(init, dict) else None
+    if t0 is None:
+        t0 = int(prev['t_end']) if prev else 0
+    Tat = (lambda t: np.asarray(T(t), float)) if callable(T) else (lambda t: np.asarray(Ta))  # host: T per rung at step t
+    K = 2 * topk if topk > 1 else 0
+    F = _compiled(g, terms_in, energy, T, block, K, vmap, params is not None)
+    terms, vals_of, start, bj, reinit, buf_insert = F['terms'], F['vals_of'], F['start'], F['bj'], F['reinit'], F['buf_insert']
+    p = params
+    energy = lambda v, t: F['Ef'](v, t, p)  # host-side evaluations below
+    if len(g.vnodes) == 0:
+        b = jnp.zeros(0, int); v = vals_of(start(b)); E = float(energy(v, t0))
+        summ = dict(chains=C, steps=0, block=block, best_E=E, n_var_nodes=0, n_moves=0, wall_s=0.0)
+        return dict(b=np.zeros((1, 0), int), rung=np.zeros(1, int), E=np.array([E]), values=np.array([[float(x)] for x in v]),
+                    t_end=t0, best=dict(E=E, b=np.zeros(0, int), values=[float(x) for x in v]), top=[(E, np.zeros(0, int))],
+                    history={}, trace={}, summary=summ)
+
+    nb = max(steps // block, 1)
+    n_nodes = len(g.vnodes)
 
     # initial wirings
     key = jax.random.PRNGKey(seed)
@@ -149,13 +174,13 @@ def optimize(g, terms, energy=None, T=1.0, chains=16, steps=20000, block=500, se
         for c in range(C):
             key, k = jax.random.split(key); ks.append(k)
         if vmap:
-            S2, acc, ys = bj(stack(states), jnp.stack(ks), jnp.asarray(rung), tb)
+            S2, acc, ys = bj(stack(states), jnp.stack(ks), jnp.asarray(rung), tb, Ta, p)
             states = unstack(S2, C); acc = np.asarray(acc); ysE = np.asarray(ys[0]); ysV = np.asarray(ys[1])
             outs = [(acc[c], ysE[c], ysV[c]) for c in range(C)]
         else:
             outs = []
             for c in range(C):
-                states[c], a, ys = bj(states[c], ks[c], int(rung[c]), tb)
+                states[c], a, ys = bj(states[c], ks[c], int(rung[c]), tb, Ta, p)
                 outs.append((float(a), np.asarray(ys[0]), np.asarray(ys[1])))
         for c in range(C):
             acc_tot[rung[c]] += float(outs[c][0])
@@ -165,7 +190,7 @@ def optimize(g, terms, energy=None, T=1.0, chains=16, steps=20000, block=500, se
                     t = tb + i + 1
                     hrows(t, c, Tat(t)[rung[c]], outs[c][1][i], outs[c][2][i])
         te = t0 + (blk + 1) * block
-        rs = [reinit(states[c], te) for c in range(C)]
+        rs = [reinit(states[c], te, p) for c in range(C)]
         states = [r[0] for r in rs]; E = np.array([float(r[1]) for r in rs])
         if swaps:
             temps = Tat(te); at = np.argsort(rung)
