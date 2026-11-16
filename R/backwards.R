@@ -52,6 +52,10 @@ prep_data_for_py <- function(gg,gm,depth,purity=1,pix.size=1e5,target_region=NUL
   bins = gm$gr[gm$gr %^% target_region]
   bins = GRanges(as.character(seqnames(bins)),ranges(bins))   # no seqinfo: a map's seqlengths can differ from the graph's
   tiled.target = gr.merge(gr.tile(bins,pix.size),dt2gr(targetnodes[cn>0,.(seqnames,start,end)]))[,c()]
+  # nodes sharing coordinates (allelic h1/h2) give the same tile once per node: keep one (its copies come from every node
+  # overlapping it, below), and stop if tiles overlap without identical coordinates
+  tiled.target = tiled.target[!duplicated(gr2dt(tiled.target)[,.(seqnames,start,end)])]
+  if (any(countOverlaps(tiled.target,tiled.target) > 1)){stop('prep_data_for_py: tiles overlap without matching coordinates (do h1/h2 nodes have different boundaries?)')}
   tb = findOverlaps(GRanges(as.character(seqnames(tiled.target)),ranges(tiled.target)),bins,type='within')
   if (length(tb) != length(tiled.target) || any(duplicated(queryHits(tb)))){stop('prep_data_for_py: a tile is not inside exactly one data bin')}
   tiled.target$bin.id = subjectHits(tb)[order(queryHits(tb))]
@@ -105,22 +109,13 @@ prep_data_for_py <- function(gg,gm,depth,purity=1,pix.size=1e5,target_region=NUL
       write.csv(data.out[[i]],paste0(write.to.folder,thisname,'.csv'))
     })
   }
-  # optional ground truth (a gWalk): noiseless R map at the same depth, simulated on the EXPORT's own tiling
-  # (rows of tiled_target.csv, tile.id = row index), then summed into the data bins: truth_expected.csv i,j index bins.csv rows
+  # optional ground truth (a gWalk): noiseless R map at the same depth, simulated by forward_simulate() on the data bins
+  # (its tiles = the bins cut at pix.size and node boundaries = tiled_target.csv; on allelic graphs one tile per h1/h2 node,
+  # both counted), then summed into the data bins: truth_expected.csv i,j index bins.csv rows
   if (!is.null(truth) && !is.null(write.to.folder)){
-    nodesgr.t = truth$graph$gr[,c('node.id','cn')]
-    nodesgr.t = nodesgr.t[strand(nodesgr.t)=='+']
-    tt.gr = tiled.target[,c()]
-    ov = gr.findoverlaps(tt.gr,nodesgr.t)
-    ov = ov[!duplicated(ov$query.id)]
-    tt.dt = gr2dt(tt.gr)[,.(start,end,seqnames,width)][,tile.id:=.I]
-    tt.dt[ov$query.id,`:=`(node.id=nodesgr.t$node.id[ov$subject.id],cn=nodesgr.t$cn[ov$subject.id])]
-    tt.dt[is.na(node.id),cn:=0]
-    tt.dt[,compartment:='A']
-    prepped.t = list(tiled.target=tt.dt[,.(start,end,seqnames,tile.id,width,node.id,cn,compartment)],widthdt=gr2dt(nodesgr.t)[,.(nodewidth=width,node.id,start,end)])
-    truth_sim = forward_simulate(truth,pix.size=pix.size,depth=depth,purity=purity,prepped=prepped.t)
+    truth_sim = forward_simulate(truth,target_region=bins,pix.size=pix.size,depth=depth,purity=purity)
     # summed into the data bins (tiles nest in bins, so the rebin is an exact sum): i, j index bins.csv rows
-    truth_sim = rebin_matrix(gM(gr=tiled.target[,c()],dat=truth_sim$dat),bins)
+    truth_sim = rebin_matrix(truth_sim,bins)
     write.csv(truth_sim$dat[,.(i,j,value)],paste0(write.to.folder,'truth_expected.csv'),row.names=FALSE)
     writeLines(jsonlite::toJSON(list(snode.ids = lapply(truth$snode.id,function(x){as.integer(x)}), circular = as.logical(truth$circular)),auto_unbox=FALSE),paste0(write.to.folder,'truth_gwalks.json'))
   }

@@ -59,3 +59,32 @@ test_that('infer_karyotype rejects purity < 1 and unbalanced graphs', {
     expect_error(opt('.kinf_check_graph')(bad), 'not balanced')
     expect_no_error(opt('.kinf_check_graph')(x$gg))
 })
+
+test_that('allelic graphs (nodes sharing coordinates): one tile per locus carrying the copies of every node there', {
+    skip_if_no_loosefix()
+    data.table::setDTthreads(1)
+    fx = load_fixture('toy_circ')  # h1/h2 nodes with identical coordinates
+    kk = fx$kars[[1]]; cn = if (is.null(kk$cn)) rep(1, length(kk$snode.id)) else kk$cn
+    idx = rep(seq_along(kk$snode.id), cn)
+    gg = fx$gg
+    walks = gW(graph = gg, snode.id = kk$snode.id[idx], circular = kk$circular[idx])
+    ## graph CNs = what the truth uses
+    eid = unlist(lapply(seq_along(walks), function(i) walks[i]$edges$dt$edge.id))
+    gg$edges$mark(cn = tabulate(eid, nbins = length(gg$edges)))
+    gg$nodes$mark(cn = tabulate(abs(unlist(kk$snode.id[idx])), nbins = length(gg$nodes)))
+    truth = gW(graph = gg, snode.id = kk$snode.id[idx], circular = kk$circular[idx])
+    gm = forward_simulate(truth, target_region = fx$ft, depth = 10, pix.size = 1e5)
+    d = tempfile('kinf_allelic_'); dir.create(d)
+    out = prep_data_for_py(gg = gg, gm = gm, depth = 10, pix.size = 1e5, target_region = fx$ft,
+                           write.to.folder = paste0(d, '/'), truth = truth)
+    tt = out$tiled_target
+    expect_false(any(duplicated(tt[, .(seqnames, start, end)])))
+    ## copies per tile = summed CN of the nodes containing its centre
+    nd = gg$nodes$dt
+    mid = floor((tt$start + tt$end) / 2)
+    want = sapply(seq_len(nrow(tt)), function(k) sum(nd$cn[as.character(nd$seqnames) == as.character(tt$seqnames[k]) & nd$start <= mid[k] & nd$end >= mid[k]]))
+    expect_equal(as.numeric(tabulate(out$dedup_tiles$tile.id, nbins = nrow(tt))), as.numeric(want))
+    ## truth map = forward_simulate on the data bins, summed into them
+    te = data.table::fread(file.path(d, 'truth_expected.csv'))
+    expect_equal(sum(te$value), sum(rebin_matrix(gm, out$bins %>% dt2gr)$dat$value), tolerance = 1e-10)
+})
