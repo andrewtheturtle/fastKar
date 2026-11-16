@@ -43,7 +43,7 @@ fastKar_integration_tiles = function(gg,mcool,target,mask=NULL,amp_cn=8,flank=5e
 	# 2. per genome tile g: obs = reads with the amplicon tile (trans and cis); q_g = (OG / EG) / median over tiles, OG = reads with genome tiles on other chromosomes, EG = CN.bp(g) x their summed CN.bp
 	#    (the tile's own sensitivity, from its genome contacts)
 	# 3. background: mu_g = q_g x (r x E_g + cis_g), E_g = CN.bp(g) x CN.bp(amplicon tile) x interchrom_density; cis_g (g on the target's chromosome) = (depth / 2) x ploidy x
-	#    bp(a) x bp(g) x distance_density(|mid(a) - mid(g)|) (fastKar prediction for ploidy unrearranged copies, as the previous caller; depth = estimate.depthratio unless given,
+	#    the Hi-C kernel integrated over the bp(a) x bp(g) pixel (forward_pixel_cpp; about bp(a) bp(g) distance_density(|mid(a) - mid(g)|) away from the diagonal) (fastKar prediction for ploidy unrearranged copies, as the previous caller; depth = estimate.depthratio unless given,
 	#    ploidy = bp-weighted graph CN). NB(mu_g, theta), (r, theta) by plain MLE on all genome tiles
 	# 4. sites: tiles within nb tiles of a breakpoint (CN change between adjacent nodes, ALT junction end, loose end with CN > 0) with p = P(X >= obs) < alpha / number of such tiles (Bonferroni).
 	#    call: 'Integrated' if any site, otherwise 'no site'. Adjacent sites merged into loci
@@ -77,8 +77,10 @@ fastKar_integration_tiles = function(gg,mcool,target,mask=NULL,amp_cn=8,flank=5e
 	ia = which(isA); hc = intersect(unique(t$seqnames),unique(ch[ia]))
 	if (length(hc)){
 		if (is.null(depth)) depth = estimate.depthratio(mcool,ploidy=ploidy,if.chr=hic_is_chr(mcool))
+		kern = forward_kernel_args(0)  # the Hi-C kernel's pixel integral over bp(a) x bp(g) (the spline is a point density)
+		pix = function(wa,wb,d) forward_pixel_cpp(wa,wb,d,kern$z,kern$lmin,kern$slope,kern$maxval,kern$maxval_density)
 		for (cc in hc){a = ia[ch[ia]==cc]; k = which(t$seqnames==cc)
-			t[k,cis:=(depth/2)*ploidy*bp[t$id[k]]*sapply(t$id[k],function(g) sum(bp[a]*distance_density(abs(mid[a]-mid[g]))))]}
+			t[k,cis:=(depth/2)*ploidy*sapply(t$id[k],function(g) sum(pix(bp[a],rep(bp[g],length(a)),abs(mid[a]-mid[g]))))]}
 	}
 	nll = function(par) -sum(dnbinom(t$obs,size=exp(par[2]),mu=t$q*(exp(par[1])*t$E+t$cis),log=TRUE))
 	f = optim(c(log(sum(t$obs)/sum(t$q*t$E)),log(2)),nll); rr = exp(f$par[1]); th = exp(f$par[2])
