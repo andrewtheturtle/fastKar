@@ -197,6 +197,8 @@ chain's NLL every n proposals (`fit$history`) for convergence plots.
 `gg` must have node and junction copy numbers (`loosefix()` it first). With `truth =` (a gWalk on `gg`, for
 simulations) the summary also reports the NLL gap to the truth and whether it was recovered exactly.
 `rescale = TRUE` corrects the depth like `bestfit_search(rescale = TRUE)`, using random wirings as candidates.
+`conserve = TRUE` scores with the balanced (contact-conserving) trans term, as `forward_simulate(conserve = TRUE)`;
+the default follows `getOption('fastKar.conserve', FALSE)`.
 
 ### On a Slurm cluster
 
