@@ -156,21 +156,15 @@ identifiability_context <- function(graph,
 ## long-read word tables) are computed once and reused for every observation.
 ## -----------------------------------------------------------------------------
 
-## Canonical string of a closed cycle (signed ids): the minimum over every rotation of v and of its
-## reverse complement -rev(v), so the result does not depend on where the cycle starts or its orientation.
-.canonical_cycle <- function(v) {
-    n = length(v); r = -rev(v)
-    min(vapply(seq_len(n) - 1L, function(i) {
-        o = c(seq_len(n)[seq_len(n) > i], seq_len(n)[seq_len(n) <= i])
-        min(paste(v[o], collapse = ','), paste(r[o], collapse = ','))
-    }, character(1)))
-}
-
 ## Footprint signature of a walk set (anything with $snode.id and $circular):
 ## the in-footprint pieces edit_dist_cpp() compares (fragments for
-## edit_mode = 'fragment', else walks stripped to footprint nodes), each in a
-## canonical orientation, sorted and hashed. Equal signatures imply edit
-## distance 0, so candidates sharing one would tie on every assay.
+## edit_mode = 'fragment', else walks stripped to footprint nodes), hashed with
+## hash_karyotype_cpp(). Equal signatures imply edit distance 0, so candidates
+## sharing one would tie on every assay.
+## In fragment mode, a circular walk lying wholly inside the footprint (every node
+## kept, every step joined, wrap-around included) is kept whole as a circular piece:
+## it hashes the same whatever its rotation or orientation, and differently from a
+## linear fragment with the same nodes. All other pieces are linear.
 ## With locus (from .haploid_locus()), node ids are mapped to loci after the
 ## split, so karyotypes differing only in h1/h2 labels on allelic graphs share
 ## a (haploid) signature.
@@ -182,36 +176,28 @@ identifiability_context <- function(graph,
     w[is.na(w) | !(ids %in% ctx$use.nodes)] = 0
     penalty[abs(ids)] = -w
     s = sort_snodes(walk$snode.id, walk$circular)
-    ## With a locus map, a circular walk lying wholly inside the footprint (fragment mode: every node
-    ## kept and every step, wrap-around included, joined) is one closed piece. sort_snodes() picked its
-    ## rotation by node id, before the map, so h1/h2 relabelled copies can start at different nodes.
-    ## Such pieces are split off here and canonicalised over all rotations after the map.
-    ## Only the fragment branch is handled; the other branch (walks stripped to footprint nodes) is unchanged.
-    closed = rep(FALSE, length(s$nodelist))
+    ## Only the fragment branch keeps closed cycles circular; the other branch (walks stripped
+    ## to footprint nodes) hashes every piece as linear, as before.
     if (!is.null(ctx$split_ends)) {
         left.in = right.in = logical(max_id)
         left.in[as.integer(names(ctx$split_ends$left))] = ctx$split_ends$left
         right.in[as.integer(names(ctx$split_ends$right))] = ctx$split_ends$right
-        if (!is.null(locus)) closed = vapply(seq_along(s$nodelist), function(k) {
+        closed = vapply(seq_along(s$nodelist), function(k) {
             v = s$nodelist[[k]]; nx = c(v[-1], v[1])
             isTRUE(s$circ[k]) && all(penalty[abs(v)] != 0) &&
                 all(ifelse(v > 0, right.in[abs(v)], left.in[abs(v)])) &&
                 all(ifelse(nx > 0, left.in[abs(nx)], right.in[abs(nx)]))
         }, logical(1))
-        pieces = split_walk_fragments(s$nodelist[!closed], s$circ[!closed], penalty, left.in, right.in)
+        frags = split_walk_fragments(s$nodelist[!closed], s$circ[!closed], penalty, left.in, right.in)
+        pieces = c(frags, s$nodelist[closed])
+        circ = c(rep(FALSE, length(frags)), rep(TRUE, sum(closed)))
     } else {
         pieces = lapply(s$nodelist, function(x) x[penalty[abs(x)] != 0])
+        circ = rep(FALSE, length(pieces))
     }
-    cyc = character(0)
-    if (!is.null(locus)) {
-        pieces = lapply(pieces, function(v) sign(v) * locus[abs(v)])
-        cyc = vapply(s$nodelist[closed], function(v) .canonical_cycle(sign(v) * locus[abs(v)]), character(1))
-    }
-    pieces = vapply(pieces[lengths(pieces) > 0], function(v) {
-        min(paste(v, collapse = ','), paste(-rev(v), collapse = ','))
-    }, character(1))
-    pieces = c(pieces, cyc)
-    digest::digest(sort(pieces), algo = 'xxhash64')
+    if (!is.null(locus)) pieces = lapply(pieces, function(v) sign(v) * locus[abs(v)])
+    keep = lengths(pieces) > 0
+    hash_karyotype_cpp(lapply(pieces[keep], as.integer), circ[keep])
 }
 
 ## Haploid locus of each node id (indexed by node id): nodes with the same
