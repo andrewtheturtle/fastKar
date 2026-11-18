@@ -9,7 +9,7 @@
 # placed at their reference positions) and, outside the graph's nodes, 2 reference copies of chr1-22 + X.
 # K is fixed (diploid calibration on hg38 chr1-22 + X): K = D 2G + mean reference cis, so a diploid reference genome has
 # bp-weighted mean b = 1 (its trans equals the current model's) and S_ref = 2G. A fixed K makes the genome-wide total
-# contacts linear in ploidy, as estimate.depthratio() assumes.
+# contacts linear in copy number, as estimate.depthratio() assumes (depth per kept copy-bp).
 # On with options(fastKar.conserve = TRUE) (or conserve = TRUE in forward_simulate(), simulate_walks(), simulate_diploid_map()).
 # Derivation and checks: ~/contexts/fastKar/docs/conservation_model_handoff.md.
 
@@ -46,10 +46,12 @@ conserve_model = function(){
 }
 
 #' Integral of the reference cis contacts per bp over [a, b] (0-based continuous coordinates) of a chromosome of length L
+#' @noRd
 .conserve_refint = function(m, a, b, L) m$G(b) - m$G(a) + m$G(L - a) - m$G(L - b)
 
 #' Chromosome lengths for reference positions: given seqlengths where known, else the calibration (hg38) length of the
 #' same chromosome ('chr' prefix ignored), else the largest end seen (ends)
+#' @noRd
 .conserve_lengths = function(chr, seqlengths = NULL, ends = NULL){
     chr = as.character(chr)
     L = if (is.null(seqlengths)) rep(NA_real_, length(chr)) else as.numeric(seqlengths[chr])

@@ -33,6 +33,8 @@ infer_karyotype(
   init = NULL,
   init_random = 0,
   conserve = getOption("fastKar.conserve", FALSE),
+  diag = FALSE,
+  mask = NULL,
   python = NULL,
   verbose = TRUE
 )
@@ -44,14 +46,14 @@ infer_karyotype(
 is scored on this map's own bins (those overlapping target_region); load a finer map for a finer fit.}
 
 \item{depth}{Hi-C depth (fastKar convention). Required for a gMatrix; for an .mcool, estimated with
-estimate.depthratio(hic, ploidy = ploidy) when NULL.}
+estimate.depthratio(hic, gg, ploidy = ploidy) when NULL (needs the mcool's 10 kb resolution; shipped reference mask).}
 
 \item{pix.size}{simulation tile size (bp): the model is simulated on the data bins cut at pix.size and at node
 boundaries, then summed into the bins. For an .mcool it also picks the resolution read.}
 
 \item{target_region}{GRanges to fit; default: the whole graph (streduce(gg$nodes$gr)).}
 
-\item{ploidy}{used for the depth estimate from an .mcool.}
+\item{ploidy}{CN outside the graph's nodes, for the depth estimate from an .mcool.}
 
 \item{purity}{only 1 is supported.}
 
@@ -102,6 +104,12 @@ a best_b.npy / gwalks.json / topk.json, or a gWalk on gg. Chains take these wiri
 \item{init_random}{with init: leave this many chains on random starts (a control).}
 
 \item{conserve}{conserved trans term (as forward_simulate(conserve =)); default getOption('fastKar.conserve', FALSE).}
+
+\item{diag}{score the diagonal (self-)pixels too (compmaps(if.diag = TRUE)) and include them in rescale totals; default
+FALSE (2026-11-18: self-pixels are library dependent and not used for depth either).}
+
+\item{mask}{pixels with a bin at least half in the reference mask are not scored nor counted in rescale totals (kept_bins());
+NULL = the shipped mask of the graph's build (hg19 / hg38 from the chr1 seqlength), a GRanges / .rds path, or FALSE (score every bin)}
 
 \item{python}{kinf interpreter (default kinf_python()).}
 }

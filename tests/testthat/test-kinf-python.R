@@ -51,8 +51,15 @@ test_that('kinf scores like fastKar: its truth NLL equals compmaps() of the obse
                         args = list(chains = 2, steps = 100, block = 50), truth = TRUE, verbose = FALSE)
     s = jsonlite::read_json(file.path(wd, 'out', 'summary.json'), simplifyVector = TRUE)
     bins = x$gm$gr[x$gm$gr %^% x$ft][, c()]
-    r = compmaps(x$gm, forward_simulate(x$truth, target_region = bins, pix.size = x$pix, depth = x$depth), theta = 2, ifsum = TRUE)
+    r = compmaps(x$gm, forward_simulate(x$truth, target_region = bins, pix.size = x$pix, depth = x$depth), theta = 2, ifsum = TRUE, if.diag = FALSE)  # kinf default diag = FALSE
     expect_equal(s$nll_truth, r, tolerance = 1e-9)
+    ## diag = 1: the diagonal pixels scored too, as compmaps(if.diag = TRUE)
+    wd2 = tempfile('kinf_cmp_'); dir.create(wd2)
+    opt('.kinf_launch')(problem = ex$dir, workdir = wd2, python = kinf_python(),
+                        args = list(chains = 2, steps = 100, block = 50, diag = 1L), truth = TRUE, verbose = FALSE)
+    s2 = jsonlite::read_json(file.path(wd2, 'out', 'summary.json'), simplifyVector = TRUE)
+    r2 = compmaps(x$gm, forward_simulate(x$truth, target_region = bins, pix.size = x$pix, depth = x$depth), theta = 2, ifsum = TRUE, if.diag = TRUE)
+    expect_equal(s2$nll_truth, r2, tolerance = 1e-9)
 })
 
 test_that('rescale leaves the depth unchanged up to the wiring spread and reports the ratio', {

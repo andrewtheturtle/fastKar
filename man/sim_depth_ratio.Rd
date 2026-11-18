@@ -3,11 +3,13 @@
 \name{sim_depth_ratio}
 \alias{sim_depth_ratio}
 \title{Shared depth correction for a set of simulated maps: observed total / median simulated total,
-with every map rebinned to the observed bins first (as compmaps() does).}
+with every map rebinned to the observed bins first (as compmaps() does); diagonal pixels left out unless if.diag; only pixels
+between kept bins (keep: logical per bin of hic$gr, NULL = all).}
 \usage{
-sim_depth_ratio(hic, sims, mc.cores = 1)
+sim_depth_ratio(hic, sims, mc.cores = 1, if.diag = FALSE, keep = NULL)
 }
 \description{
 Shared depth correction for a set of simulated maps: observed total / median simulated total,
-with every map rebinned to the observed bins first (as compmaps() does).
+with every map rebinned to the observed bins first (as compmaps() does); diagonal pixels left out unless if.diag; only pixels
+between kept bins (keep: logical per bin of hic$gr, NULL = all).
 }

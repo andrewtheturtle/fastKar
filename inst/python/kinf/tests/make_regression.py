@@ -6,7 +6,9 @@ interchrom_density. Refrozen 2026-11-13 from the current modules after interchro
 (3.01e-13, was chr1 x chr2 2.80e-13) and the selftest was regenerated (scripts/make_kinf_selftest.R).
 Refrozen 2026-11-16 after the pixel-integrated kernel (with the circle fold) and the 2026-11-16 parameter refit; selftest
 regenerated (now with conserve.csv). Frozen with the worktree optimize.py (site-mixture changes, uncommitted then). Same wirings, moves and
-search settings as the tests. Run from a clean checkout of the kinf modules (uncommitted optimize.py changes would be frozen in).
+search settings as the tests.
+Refrozen 2026-11-18 after the retraining on the reference mask (depth = valid-pair coverage; D 4.918653e-13) and the switch
+to diag = False (diagonal pixels not scored) by default; selftest regenerated. Run from a clean checkout of the kinf modules (uncommitted optimize.py changes would be frozen in).
 Usage: python -I tests/make_regression.py"""
 import os, sys, json
 import numpy as np

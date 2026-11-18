@@ -76,7 +76,7 @@ fastKar_integration_tiles = function(gg,mcool,target,mask=NULL,amp_cn=8,flank=5e
 	t[,q:=(OG/EG)/median(OG/EG)][,E:=cnbp*acnbp*fastKar::interchrom_density][,cis:=0]
 	ia = which(isA); hc = intersect(unique(t$seqnames),unique(ch[ia]))
 	if (length(hc)){
-		if (is.null(depth)) depth = estimate.depthratio(mcool,ploidy=ploidy,if.chr=hic_is_chr(mcool))
+		if (is.null(depth)) depth = estimate.depthratio(mcool,gg=gg,mask=mask,ploidy=ploidy)
 		kern = forward_kernel_args(0)  # the Hi-C kernel's pixel integral over bp(a) x bp(g) (the spline is a point density)
 		pix = function(wa,wb,d) forward_pixel_cpp(wa,wb,d,kern$z,kern$lmin,kern$slope,kern$maxval,kern$maxval_density)
 		for (cc in hc){a = ia[ch[ia]==cc]; k = which(t$seqnames==cc)
@@ -101,7 +101,7 @@ fastKar_integration_tiles = function(gg,mcool,target,mask=NULL,amp_cn=8,flank=5e
 	list(call=if (nrow(sites)) 'Integrated' else 'no site',sites=sites,loci=loci,r=rr,theta=th,cut=cut,depth=if (is.null(depth)) NA else depth,ploidy=ploidy,amp_cn=acn,amp_tile=tl[isA],tiles=t[,!'id'])
 }
 
-# mcool helpers, moved from R/ecfinder.R (archived 2026-11-10); used by fastKar_integration_tiles() for estimate.depthratio(if.chr)
+# mcool helpers, moved from R/ecfinder.R (archived 2026-11-10); no longer used in the package since estimate.depthratio() reads chromosome names itself (2026-11-18)
 hic_res = function(path) {
 	path = normalizePath(path)
 	pathtype = tools::file_ext(path)

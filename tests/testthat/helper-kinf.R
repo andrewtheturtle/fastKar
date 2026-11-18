@@ -20,7 +20,7 @@ kinf_export = function(x, dir = tempfile('kinf_test_')) {
 
 ## R reference NLL of an exported folder: area-weighted NB NLL (compdats, theta 2, area0 = median bin width^2)
 ## of the observed map vs truth_expected.csv on the data bins (bins.csv; scoring is on the data bins since 2026-11-11)
-kinf_ref_nll = function(dir) {
+kinf_ref_nll = function(dir, if.diag = FALSE) {  # if.diag = FALSE: kinf's default (diagonal pixels not scored)
     tt = data.table::fread(file.path(dir, 'bins.csv'))
     gr = GenomicRanges::GRanges(tt$seqnames, IRanges::IRanges(tt$start, tt$end))
     tmpl = data.table::as.data.table(make_template_dat_cpp(data.table::data.table(width = as.numeric(width(gr)))))
@@ -28,5 +28,5 @@ kinf_ref_nll = function(dir) {
     ex = data.table::fread(file.path(dir, 'truth_expected.csv'))
     d1 = data.table::copy(tmpl); d1[, value := 0]; d1[obs, value := i.value, on = c('i', 'j')]
     d2 = data.table::copy(tmpl); d2[, value := 0]; d2[ex, value := i.value, on = c('i', 'j')]
-    compdats(d1, d2, theta = 2, ifsum = TRUE, area0 = stats::median(width(gr))^2)
+    compdats(d1, d2, theta = 2, ifsum = TRUE, if.diag = if.diag, area0 = stats::median(width(gr))^2)
 }

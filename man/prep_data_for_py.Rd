@@ -12,7 +12,8 @@ prep_data_for_py(
   pix.size = 1e+05,
   target_region = NULL,
   write.to.folder = NULL,
-  truth = NULL
+  truth = NULL,
+  mask = NULL
 )
 }
 \arguments{
@@ -35,6 +36,9 @@ gg$footprint. Nodes outside it are still wired.}
 noiseless forward_simulate() map on the export's tiles, summed into the data bins; i, j index rows of bins.csv).
 gm_dat.csv holds the observed counts on the data bins (i, j index bins.csv rows); tiled_target.csv has each
 tile's bin.id.}
+
+\item{mask}{reference mask for the bins' keep column (kept_bins(): less than half masked; kinf scores only pixels between kept
+bins); NULL = the shipped mask of gg's build, GRanges / .rds path, or FALSE (every bin kept)}
 }
 \value{
 named list of the exported tables (conserve.csv: Q_out of conserve_outside(), used by kinf with conserve = True).

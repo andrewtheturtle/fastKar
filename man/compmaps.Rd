@@ -9,13 +9,17 @@ compmaps(
   map_theory,
   theta = 2,
   ifsum = F,
-  if.diag = T,
+  if.diag = F,
   ifscale = F,
   mask = NULL,
   return_kl = F,
   area0 = NULL,
   maskzeros = F
 )
+}
+\arguments{
+\item{mask}{NULL (score every pixel); a logical per bin of map_exp$gr (TRUE = kept) or a reference mask (GRanges / .rds
+path; kept_bins()): pixels with a dropped bin score 0}
 }
 \description{
 Per-pixel NB NLL (or KL) of map_exp under map_theory, both on map_exp's bins, each pixel weighted by its

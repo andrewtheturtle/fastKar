@@ -17,12 +17,14 @@
 #' @param target_region GRanges of the Hi-C fit region; the data bins of gm overlapping it are scored (bins.csv). Default
 #'   gg$footprint. Nodes outside it are still wired.
 #' @param write.to.folder folder path ending in '/'; NULL: return the tables only.
+#' @param mask reference mask for the bins' keep column (kept_bins(): less than half masked; kinf scores only pixels between kept
+#'   bins); NULL = the shipped mask of gg's build, GRanges / .rds path, or FALSE (every bin kept)
 #' @param truth optional gWalk on gg (simulations): also writes truth_gwalks.json and truth_expected.csv (the
 #'   noiseless forward_simulate() map on the export's tiles, summed into the data bins; i, j index rows of bins.csv).
 #'   gm_dat.csv holds the observed counts on the data bins (i, j index bins.csv rows); tiled_target.csv has each
 #'   tile's bin.id.
 #' @return named list of the exported tables (conserve.csv: Q_out of conserve_outside(), used by kinf with conserve = True).
-prep_data_for_py <- function(gg,gm,depth,purity=1,pix.size=1e5,target_region=NULL,write.to.folder=NULL,truth=NULL){ 
+prep_data_for_py <- function(gg,gm,depth,purity=1,pix.size=1e5,target_region=NULL,write.to.folder=NULL,truth=NULL,mask=NULL){ 
   if (is.null(target_region)){
     target_region = gg$footprint
   }
@@ -51,6 +53,9 @@ prep_data_for_py <- function(gg,gm,depth,purity=1,pix.size=1e5,target_region=NUL
   # scoring (as bestfit_search() simulates on the observed bins and compmaps() rebins onto them).
   bins = gm$gr[gm$gr %^% target_region]
   bins = GRanges(as.character(seqnames(bins)),ranges(bins))   # no seqinfo: a map's seqlengths can differ from the graph's
+  # keep = less than half of the bin in the reference mask (kinf scores only pixels between kept bins); mask = NULL: shipped mask of
+  # the graph's build, FALSE: every bin kept
+  bins$keep = .scoring_keep(bins,mask,gg)
   tiled.target = gr.merge(gr.tile(bins,pix.size),dt2gr(targetnodes[cn>0,.(seqnames,start,end)]))[,c()]
   # nodes sharing coordinates (allelic h1/h2) give the same tile once per node: keep one (its copies come from every node
   # overlapping it, below), and stop if tiles overlap without identical coordinates
@@ -122,7 +127,10 @@ prep_data_for_py <- function(gg,gm,depth,purity=1,pix.size=1e5,target_region=NUL
   return(data.out)
 }
 
-bestfit_search = function(graph,hic,nsample,depth,pix.size=NULL,target_region=NULL,topk=1,mc.cores=1,keep.circular=T,purity=1,verbose=F,rescale=F){
+bestfit_search = function(graph,hic,nsample,depth,pix.size=NULL,target_region=NULL,topk=1,mc.cores=1,keep.circular=T,purity=1,verbose=F,rescale=F,if.diag=FALSE,mask=NULL){
+	# pixels with a bin at least half in the reference mask are not scored nor counted in the rescale (2026-11-18, user: structures
+	# near masked regions cannot be resolved anyway). mask = NULL: shipped mask of the graph's build; FALSE: score every bin.
+	keep = .scoring_keep(hic$gr,mask,graph)
 	if (is.null(target_region)){
 		target_region = graph$footprint
 	}
@@ -155,25 +163,29 @@ bestfit_search = function(graph,hic,nsample,depth,pix.size=NULL,target_region=NU
 	# to the observed total. Use the median candidate total so that no single sample sets it.
 	#ratio = sum(hic$value)/median(unlist(lapply(sims,function(s){sum(s$value)})))
 	#neglogliks = unlist(mclapply(sims,function(s){compmaps(hic,s*ratio,theta=2,ifsum=T)},mc.cores=mc.cores))
-	# rescale = TRUE: one shared ratio = observed total / median candidate total, both on the observed bins
+	# rescale = TRUE: one shared ratio for the whole search = observed total / median candidate total, both on the observed bins,
+	# off-diagonal pixels only unless if.diag (for regions where the genome-wide depth is off). if.diag: score the diagonal pixels too.
 	ratio = 1
 	if (rescale){
-		ratio = sim_depth_ratio(hic,sims,mc.cores=mc.cores)
+		ratio = sim_depth_ratio(hic,sims,mc.cores=mc.cores,if.diag=if.diag,keep=keep)
 		sims = lapply(sims,function(s){s*ratio})
 	}
-	neglogliks = unlist(mclapply(sims,function(s){compmaps(hic,s,theta=2,ifsum=T)},mc.cores=mc.cores))
+	neglogliks = unlist(mclapply(sims,function(s){compmaps(hic,s,theta=2,ifsum=T,if.diag=if.diag,mask=keep)},mc.cores=mc.cores))
 	if (topk==-1){
 		best = order(neglogliks)
 	}else{
 		best = order(neglogliks)[1:topk]
 	}
-	return(list(true_hic = hic,kars=gw[best],nlls=neglogliks[best],sims = sims[best],purity=purity,ratio=ratio))
+	return(list(true_hic = hic,kars=gw[best],nlls=neglogliks[best],sims = sims[best],purity=purity,ratio=ratio,keep=keep))
 }
 
 #' Shared depth correction for a set of simulated maps: observed total / median simulated total,
-#' with every map rebinned to the observed bins first (as compmaps() does).
-sim_depth_ratio = function(hic,sims,mc.cores=1){
-	obs_total = sum(rebin_matrix(hic,hic$gr)$dat$value,na.rm=T)
-	sim_totals = unlist(mclapply(sims,function(s){sum(rebin_matrix(s,hic$gr)$dat$value,na.rm=T)},mc.cores=mc.cores))
+#' with every map rebinned to the observed bins first (as compmaps() does); diagonal pixels left out unless if.diag; only pixels
+#' between kept bins (keep: logical per bin of hic$gr, NULL = all).
+sim_depth_ratio = function(hic,sims,mc.cores=1,if.diag=FALSE,keep=NULL){
+	if (is.null(keep)) keep = rep(TRUE,length(hic$gr))
+	tot = function(d) d[keep[i] & keep[j] & (if.diag | i != j), sum(value,na.rm=T)]
+	obs_total = tot(rebin_matrix(hic,hic$gr)$dat)
+	sim_totals = unlist(mclapply(sims,function(s){tot(rebin_matrix(s,hic$gr)$dat)},mc.cores=mc.cores))
 	obs_total/median(sim_totals)
 }

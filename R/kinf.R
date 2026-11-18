@@ -338,11 +338,11 @@ kinf_check = function(python = NULL, backend = c('local', 'slurm'), device = c('
 #' @param hic gMatrix of observed counts, or the path to an .mcool (read at the finest resolution <= pix.size). The fit
 #'   is scored on this map's own bins (those overlapping target_region); load a finer map for a finer fit.
 #' @param depth Hi-C depth (fastKar convention). Required for a gMatrix; for an .mcool, estimated with
-#'   estimate.depthratio(hic, ploidy = ploidy) when NULL.
+#'   estimate.depthratio(hic, gg, ploidy = ploidy) when NULL (needs the mcool's 10 kb resolution; shipped reference mask).
 #' @param pix.size simulation tile size (bp): the model is simulated on the data bins cut at pix.size and at node
 #'   boundaries, then summed into the bins. For an .mcool it also picks the resolution read.
 #' @param target_region GRanges to fit; default: the whole graph (streduce(gg$nodes$gr)).
-#' @param ploidy used for the depth estimate from an .mcool.
+#' @param ploidy CN outside the graph's nodes, for the depth estimate from an .mcool.
 #' @param purity only 1 is supported.
 #' @param method 'pt' (parallel tempering) or 'greedy' (all chains at T = 0).
 #' @param chains,steps,block,tmin,tmax,seed search settings: chains (= PT rungs), proposals per chain, proposals
@@ -376,6 +376,10 @@ kinf_check = function(python = NULL, backend = c('local', 'slurm'), device = c('
 #'   a best_b.npy / gwalks.json / topk.json, or a gWalk on gg. Chains take these wirings in order (round robin).
 #' @param init_random with init: leave this many chains on random starts (a control).
 #' @param conserve conserved trans term (as forward_simulate(conserve =)); default getOption('fastKar.conserve', FALSE).
+#' @param mask pixels with a bin at least half in the reference mask are not scored nor counted in rescale totals (kept_bins());
+#'   NULL = the shipped mask of the graph's build (hg19 / hg38 from the chr1 seqlength), a GRanges / .rds path, or FALSE (score every bin)
+#' @param diag score the diagonal (self-)pixels too (compmaps(if.diag = TRUE)) and include them in rescale totals; default
+#'   FALSE (2026-11-18: self-pixels are library dependent and not used for depth either).
 #' @param python kinf interpreter (default kinf_python()).
 #' @return list(gw = gWalk on gg, summary = list from summary.json, trace = data.table of the search curve
 #'   (best and per-rung NLL per block), workdir); with topk > 1 also kars (list of gWalks, best first) and nlls;
@@ -386,7 +390,7 @@ infer_karyotype = function(gg, hic, depth = NULL, pix.size = 1e6, target_region 
                            tmax = 1000, seed = 0, device = c('auto', 'gpu', 'cpu'), gpu = NULL, cores = NULL,
                            backend = c('local', 'slurm'), slurm = list(), wait = TRUE, workdir = NULL,
                            truth = NULL, topk = 1, rescale = FALSE, history_every = 0, init = NULL,
-                           init_random = 0, conserve = getOption('fastKar.conserve', FALSE), python = NULL,
+                           init_random = 0, conserve = getOption('fastKar.conserve', FALSE), diag = FALSE, mask = NULL, python = NULL,
                            verbose = TRUE){
   method = match.arg(method); device = match.arg(device); backend = match.arg(backend)
   if (purity != 1) stop('purity != 1 is not supported by the Python model yet')
@@ -408,7 +412,7 @@ infer_karyotype = function(gg, hic, depth = NULL, pix.size = 1e6, target_region 
     if (!any(avail <= pix.size)) stop('no mcool resolution <= pix.size (available: ', paste(sort(avail), collapse = ', '), ')')
     res = max(avail[avail <= pix.size])
     if (verbose) message('reading ', hic, ' at ', res, ' bp')
-    if (is.null(depth)) depth = estimate.depthratio(hic, ploidy = ploidy)
+    if (is.null(depth)) depth = estimate.depthratio(hic, gg = gg, ploidy = ploidy)
     hic = cooler(hic, res = res, gr = target_region)
   } else if (is.null(depth)) stop('depth is required when hic is a gMatrix')
   if (verbose) message('depth ', signif(depth, 4))
@@ -421,14 +425,14 @@ infer_karyotype = function(gg, hic, depth = NULL, pix.size = 1e6, target_region 
   pdir = file.path(workdir, 'problem')
   dir.create(pdir, recursive = TRUE, showWarnings = FALSE)
   prep_data_for_py(gg = gg, gm = hic, depth = depth, purity = purity, pix.size = pix.size,
-                   target_region = target_region, write.to.folder = paste0(pdir, '/'), truth = truth)
+                   target_region = target_region, write.to.folder = paste0(pdir, '/'), truth = truth, mask = mask)
   init_file = .kinf_init_file(init, workdir)
   job = .kinf_launch(problem = pdir, workdir = workdir, python = py,
                      args = list(method = method, chains = chains, steps = steps, block = block, tmin = tmin,
                                  tmax = tmax, seed = seed, topk = topk, history = as.integer(history_every),
                                  rescale = if (isTRUE(rescale)) 256L else as.integer(rescale),
                                  init = init_file, `init-random` = if (!is.null(init_file)) as.integer(init_random),
-                                 conserve = as.integer(isTRUE(conserve)),
+                                 conserve = as.integer(isTRUE(conserve)), diag = as.integer(isTRUE(diag)),
                                  device = if (backend == 'slurm' && device == 'auto') 'gpu' else device),
                      truth = !is.null(truth), backend = backend, slurm = slurm, wait = wait, gpu = gpu,
                      cores = cores, verbose = verbose)

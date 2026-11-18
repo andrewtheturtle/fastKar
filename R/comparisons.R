@@ -166,7 +166,7 @@
 
 ## ---------------------------------------------------------------------------------------------
 
-f1score_comparemaps <- function(null_map,hyp_map,theta=2,significance = 0.05,return_samples=FALSE,mask=NULL){
+f1score_comparemaps <- function(null_map,hyp_map,theta=2,significance = 0.05,return_samples=FALSE,mask=NULL,if.diag=FALSE){
   if (!is.null(mask)){
       gr = null_map$gr %&% mask
       bad.inds = gr$tile.id
@@ -190,19 +190,21 @@ f1score_comparemaps <- function(null_map,hyp_map,theta=2,significance = 0.05,ret
   if (fast){
     draws = lapply(preps,function(p){.noisy_draw(p,num_samples,theta)}) #samples to classify
     P = preps[[1]]$P
+    off = if.diag | raws[[1]][['i']] != raws[[1]][['j']]  # diagonal pixels left out unless if.diag, as compdats() (default FALSE since 2026-11-18)
+    y1 = raws[[1]][['value']][off]; y2 = raws[[2]][['value']][off]
     likelihooddiff = lapply(seq_along(draws),function(s){
-	    wp = preps[[s]]$widthprod
+	    wp = preps[[s]]$widthprod; if (length(wp) > 1) wp = wp[off]
 	    unlist(setNames(lapply(seq_len(num_samples),function(k){
-		    x = draws[[s]][((k-1)*P+1):(k*P)]
-		    return(sum(.compdats_values(x,raws[[1]][['value']],wp,theta,FALSE,1e8),na.rm=TRUE)-
-			   sum(.compdats_values(x,raws[[2]][['value']],wp,theta,FALSE,1e8),na.rm=TRUE))
+		    x = draws[[s]][((k-1)*P+1):(k*P)][off]
+		    return(sum(.compdats_values(x,y1,wp,theta,FALSE,1e8),na.rm=TRUE)-
+			   sum(.compdats_values(x,y2,wp,theta,FALSE,1e8),na.rm=TRUE))
 	    }),as.character(seq_len(num_samples))))
     })
   }else{
   samples = lapply(list(null_map,hyp_map),function(m){make_noisydat(m,num_samples,theta)}) #samples to classify}
   likelihooddiff = lapply(samples,function(s){
                    unlist(lapply(s,function(ss){
-                    return(compdats(ss,null_map$dat,theta)-compdats(ss,hyp_map$dat,theta))
+                    return(compdats(ss,null_map$dat,theta,if.diag=if.diag)-compdats(ss,hyp_map$dat,theta,if.diag=if.diag))
                     }))
                    })
   }
@@ -334,7 +336,7 @@ liktest_separable_lr = function(gwa,gwb,readL,depth=1,nsamp = 20,mc.cores=1,back
 	return(error_rate)
 }
 
-liktest_separable = function(map_a,map_b,theta=2,nsamp = 20,mc.cores=1,error.thresh = NULL){
+liktest_separable = function(map_a,map_b,theta=2,nsamp = 20,mc.cores=1,error.thresh = NULL,if.diag=FALSE){  # if.diag: score the diagonal pixels (TRUE for long-read maps)
 	## fast path: the samples are only scored against map_a and map_b (compdats with its defaults,
 	## theta = 2 and area0 = 1e8), so draw them as make_noisydat() does and score the value vectors
 	prep_a = .noisy_prep(map_a,nsamp)
@@ -346,12 +348,14 @@ liktest_separable = function(map_a,map_b,theta=2,nsamp = 20,mc.cores=1,error.thr
 		draws_a = .noisy_draw(prep_a,nsamp,theta)
 		draws_b = .noisy_draw(prep_b,nsamp,theta)
 		P = prep_a$P
-		ya = raw_a[['value']]
-		yb = raw_b[['value']]
+		off = if.diag | raw_a[['i']] != raw_a[['j']]  # diagonal pixels left out unless if.diag, as compdats() (default FALSE since 2026-11-18)
+		ya = raw_a[['value']][off]
+		yb = raw_b[['value']][off]
 		nll = function(x,y,wp){sum(.compdats_values(x,y,wp,2,FALSE,1e8),na.rm=TRUE)}
 		ratios = function(draws,wp){
+			if (length(wp) > 1) wp = wp[off]
 			unlist(mclapply(seq_len(nsamp),function(k){
-				x = draws[((k-1)*P+1):(k*P)]
+				x = draws[((k-1)*P+1):(k*P)][off]
 				-nll(x,ya,wp)+nll(x,yb,wp)
 			},mc.cores=mc.cores))
 		}
@@ -361,7 +365,7 @@ liktest_separable = function(map_a,map_b,theta=2,nsamp = 20,mc.cores=1,error.thr
 	a_samples = make_noisydat(map_a,nsamp=nsamp,theta=theta)
 	b_samples = make_noisydat(map_b,nsamp=nsamp,theta=theta)
 	#c,maskzeros=Tompmaps is the negative log likelihood
-	loglikratio = function(sample){-compdats(sample,map_a$dat)+compdats(sample,map_b$dat)}
+	loglikratio = function(sample){-compdats(sample,map_a$dat,if.diag=if.diag)+compdats(sample,map_b$dat,if.diag=if.diag)}
 
 	a_ratios = unlist(mclapply(a_samples,loglikratio,mc.cores=mc.cores))
 	b_ratios = unlist(mclapply(b_samples,loglikratio,mc.cores=mc.cores))
@@ -383,12 +387,20 @@ kl_nb <- function(mu1, mu2, r=2,tinyval=1e-10,ifsum=T) { #get KL divergence betw
   }
 }
 
+## mask of compmaps(): a logical per bin of gr (TRUE = kept), or a reference mask (GRanges / .rds path) -> kept_bins()
+.mask_keep = function(mask, gr){
+   if (is.logical(mask)){ if (length(mask) != length(gr)) stop('mask: logical mask needs one value per bin'); return(mask) }
+   kept_bins(gr, mask)
+}
+
 #' Weighted NB NLL (or KL) of one Hi-C map under another
 #'
 #' Per-pixel NB NLL (or KL) of map_exp under map_theory, both on map_exp's bins, each pixel weighted by its
 #' area width_i * width_j / area0. area0 defaults to the squared median bin width of map_exp, so on evenly
 #' spaced observed bins every weight is 1 (only partial bins differ)
-compmaps = function(map_exp,map_theory,theta=2,ifsum=F,if.diag=T,ifscale=F,mask=NULL,return_kl=F,area0=NULL,maskzeros=F){
+#' @param mask NULL (score every pixel); a logical per bin of map_exp$gr (TRUE = kept) or a reference mask (GRanges / .rds
+#'   path; kept_bins()): pixels with a dropped bin score 0
+compmaps = function(map_exp,map_theory,theta=2,ifsum=F,if.diag=F,ifscale=F,mask=NULL,return_kl=F,area0=NULL,maskzeros=F){
    if (is.null(area0)){
 	area0 = median(width(map_exp$gr))^2
    }
@@ -404,10 +416,10 @@ compmaps = function(map_exp,map_theory,theta=2,ifsum=F,if.diag=T,ifscale=F,mask=
        res = .compdats_aligned(dat_exp,dat_theory,theta,if.diag,return_kl,area0,widths)
        value = res$value
        if (!is.null(mask)){
-           bad.inds = (map_exp$gr %&% mask)$tile.id
+           drop = !.mask_keep(mask, map_exp$gr)
            ii = dat_exp[['i']]; jj = dat_exp[['j']]
            if (!is.null(res$keep)){ii = ii[res$keep]; jj = jj[res$keep]}
-           value[(ii %in% bad.inds) & (jj %in% bad.inds)] = 0
+           value[drop[ii] | drop[jj]] = 0
            res$value = value
        }
        if (ifsum){
@@ -418,8 +430,8 @@ compmaps = function(map_exp,map_theory,theta=2,ifsum=F,if.diag=T,ifscale=F,mask=
    }
    comp_dat = compdats(map_exp$dat,map_theory$dat,theta,ifsum=FALSE,if.diag=if.diag,return_kl=return_kl,area0=area0,widths=widths)
    if (!is.null(mask)){
-       bad.inds = (map_exp$gr %&% mask)$tile.id
-       comp_dat[(i %in% bad.inds) & (j %in% bad.inds),value:=0]
+       drop = !.mask_keep(mask, map_exp$gr)
+       comp_dat[drop[i] | drop[j],value:=0]
    }
    if (ifsum){
        return(sum(comp_dat$value))
@@ -428,45 +440,153 @@ compmaps = function(map_exp,map_theory,theta=2,ifsum=F,if.diag=T,ifscale=F,mask=
    }
 }
 
-estimate.depthratio <- function(filepath,res=1e6,ploidy=2,if.chr=FALSE,purity=1){ #put here hic data for a whole genome
-    if (!is.numeric(purity) || length(purity) != 1 || is.na(purity) || purity < 0 || purity > 1){
-        stop('purity must be a single numeric value between 0 and 1')
+#' Reference build from the chr1 length (hg19 / hg38), NA if neither
+#' @noRd
+.build_from_chr1 = function(l1) if (isTRUE(l1 == 249250621)) 'hg19' else if (isTRUE(l1 == 248956422)) 'hg38' else NA_character_
+
+#' Reference mask as GRanges without 'chr' prefixes: mask (GRanges or .rds path), or the shipped mask of build when NULL
+#' @noRd
+.read_mask = function(mask = NULL, build = NULL){
+    if (is.null(mask)){
+        if (is.null(build) || is.na(build)) stop('no reference mask: give mask, or a genome whose build (hg19 / hg38) is recognised from the chr1 length')
+        mask = system.file('extdata', paste0('mask_', build, '.rds'), package = 'fastKar', mustWork = TRUE)
     }
-    if (!is.numeric(ploidy) || length(ploidy) != 1 || is.na(ploidy) || ploidy <= 0){
-        stop('ploidy must be a single positive numeric value')
+    if (is.character(mask)) mask = readRDS(mask)
+    GenomicRanges::reduce(GenomicRanges::GRanges(sub('^chr', '', as.character(GenomicRanges::seqnames(mask))), IRanges::ranges(mask)))
+}
+
+#' Bins kept for scoring: less than half of the bin in the reference mask (the rule of the model training and estimate.depthratio())
+#'
+#' @param gr bins (GRanges; 'chr' prefixes ignored)
+#' @param mask GRanges or .rds path; NULL = the shipped mask of build
+#' @param build 'hg19' or 'hg38', used when mask is NULL
+#' @return logical, one per bin
+#' @export
+kept_bins = function(gr, mask = NULL, build = NULL){
+    mask = .read_mask(mask, build)
+    bgr = GenomicRanges::GRanges(sub('^chr', '', as.character(GenomicRanges::seqnames(gr))), IRanges::ranges(gr))
+    o = GenomicRanges::findOverlaps(bgr, mask)
+    mbp = numeric(length(bgr))
+    if (length(o)){
+        w = tapply(BiocGenerics::width(GenomicRanges::pintersect(bgr[S4Vectors::queryHits(o)], mask[S4Vectors::subjectHits(o)])), S4Vectors::queryHits(o), sum)
+        mbp[as.integer(names(w))] = as.numeric(w)
     }
-    mode = tools::file_ext(filepath)
-    if (mode=='mcool'){ #chromosome lengths from the file itself, so any build works (e.g. hg38 Pore-C; hg19 files give the hg19 lengths)
-        chroms = rhdf5::h5read(filepath, paste0('/resolutions/', as.integer(res), '/chroms'))
-        main = grepl('^(chr)?([0-9]+|X|Y)$', chroms$name)
-        wholegenome = gr.tile(si2gr(setNames(as.numeric(chroms$length[main]), sub('^chr', '', chroms$name[main]))),res)
-    }else if (mode=='hic'){ #chromosome lengths from the file too (hg38 .hic files would otherwise be tiled with hg19 lengths)
-        chroms = strawr::readHicChroms(filepath)
-        main = grepl('^(chr)?([0-9]+|X|Y)$', chroms$name)
-        wholegenome = gr.tile(si2gr(setNames(as.numeric(chroms$length[main]), sub('^chr', '', chroms$name[main]))),res)
-    }else{
-        wholegenome = gr.tile(si2gr(hg_seqlengths()[1:24]),res)
+    mbp < BiocGenerics::width(bgr)/2
+}
+
+#' Kept bins for scoring against a graph: mask FALSE = all; NULL = shipped mask of the graph's build (all kept, with a warning, when
+#' the build is not recognised, e.g. toy graphs); else kept_bins(gr, mask)
+#' @noRd
+.scoring_keep = function(gr, mask, gg){
+    if (isFALSE(mask)) return(rep(TRUE, length(gr)))
+    if (is.null(mask)){
+        b = .graph_build(gg)
+        if (is.na(b)){ warning('reference build not recognised from the graph (chr1 seqlength): every bin scored; give mask to mask bins'); return(rep(TRUE, length(gr))) }
+        return(kept_bins(gr, NULL, b))
     }
-    if (if.chr){
-        wholegenome = gr.chr(wholegenome)
+    kept_bins(gr, mask)
+}
+
+#' Build of a gGraph from its chr1 seqlength (NA if unknown)
+#' @noRd
+.graph_build = function(gg){
+    sl = GenomeInfoDb::seqlengths(gg$gr)
+    .build_from_chr1(sl[match('1', sub('^chr', '', names(sl)))])
+}
+
+#' Hi-C depth from total off-diagonal contacts per unit of genomic content
+#'
+#' depth = N / (calib x C). N = contacts between distinct kept 10 kb bins (each pixel once; the 10 kb self-pixels are left out, so
+#' library differences in very short-range contacts do not set the depth), C = kept copy-bp
+#' (sum over kept bins of bp x CN: graph node CN where the graph has nodes, ploidy elsewhere and everywhere without a graph).
+#' A bin is kept if < half of it is in the reference mask. calib = contacts per kept copy-bp per unit depth on GM12878 at the
+#' training depth (valid-pair coverage, per scripts/modeltraining.R), so GM12878 returns the training depth and depth is in
+#' GM12878-equivalent valid-pair coverage. forward_simulate() takes this depth and halves it to the haploid depth.
+#' Replaces the old formula (sum of the 1 Mb map x 300 / 3e9 x 2 / ploidy), 2026-11-18.
+#' @param hic .hic or .mcool path (raw counts; needs the 10 kb resolution)
+#' @param gg optional gGraph with node CN (same build as hic); bp not covered by its nodes get CN = ploidy
+#' @param mask reference mask (GRanges or .rds path) of the build of hic; NULL = the shipped mask
+#'   (inst/extdata/mask_{hg19,hg38}.rds), build picked from the chr1 length in the file
+#' @param ploidy CN outside the graph (everywhere when gg is NULL)
+#' @param purity only 1 is supported (normal contamination not handled yet)
+#' Works at 10 kb only (the resolution of the calibration and of the excluded self-pixels).
+#' @param calib off-diagonal contacts per kept copy-bp per unit depth (GM12878 training; default the shipped depth_calibration)
+#' @param chrs chromosomes used
+#' @param mc.cores cores over chromosome pairs (.hic)
+#' @return depth, with attributes N, content (kept copy-bp), kept_bp
+#' @export
+estimate.depthratio = function(hic, gg = NULL, mask = NULL, ploidy = 2, purity = 1, calib = fastKar::depth_calibration,
+                               chrs = c(1:22, 'X'), mc.cores = 1){
+    if (purity != 1) stop('estimate.depthratio: purity != 1 is not supported yet')
+    res = 1e4
+    mode = tools::file_ext(hic)
+    if (mode == 'hic'){
+        cl = strawr::readHicChroms(hic); cname = cl$name; clen = as.numeric(cl$length)
+    } else if (mode == 'mcool'){
+        cl = rhdf5::h5read(hic, paste0('/resolutions/', as.integer(res), '/chroms')); cname = cl$name; clen = as.numeric(cl$length)
+    } else stop('estimate.depthratio: .hic or .mcool only')
+    bare = sub('^chr', '', cname)
+    mask = .read_mask(mask, .build_from_chr1(clen[match('1', bare)]))
+    sel = match(chrs, bare)
+    if (any(is.na(sel))) stop('estimate.depthratio: chromosomes missing from ', hic, ': ', paste(chrs[is.na(sel)], collapse = ', '))
+    clen = setNames(clen[sel], chrs); cname = setNames(cname[sel], chrs)
+    # kept 10 kb bins
+    bins = gr2dt(gr.tile(si2gr(clen), res))[, .(seqnames = as.character(seqnames), start, end, width)]
+    bgr = GenomicRanges::GRanges(bins$seqnames, IRanges::IRanges(bins$start, bins$end))
+    o = GenomicRanges::findOverlaps(bgr, mask)
+    mbp = tapply(BiocGenerics::width(GenomicRanges::pintersect(bgr[S4Vectors::queryHits(o)], mask[S4Vectors::subjectHits(o)])), S4Vectors::queryHits(o), sum)
+    bins[, masked := 0][as.integer(names(mbp)), masked := as.numeric(mbp)][, keep := masked < width/2]
+    # kept copy-bp: bp-weighted graph CN of each kept bin
+    if (is.null(gg)){
+        bins[, cn := ploidy]
+    } else {
+        nd = data.table::as.data.table(gg$nodes$dt)[, .(chr = sub('^chr', '', as.character(seqnames)), start, end, cn = as.numeric(cn))][is.na(cn), cn := 0]
+        ngr = GenomicRanges::GRanges(nd$chr, IRanges::IRanges(nd$start, nd$end))
+        o = GenomicRanges::findOverlaps(bgr, ngr)
+        cbp = tapply(BiocGenerics::width(GenomicRanges::pintersect(bgr[S4Vectors::queryHits(o)], ngr[S4Vectors::subjectHits(o)])) * nd$cn[S4Vectors::subjectHits(o)],
+                     S4Vectors::queryHits(o), sum)
+        nbp = tapply(BiocGenerics::width(GenomicRanges::pintersect(bgr[S4Vectors::queryHits(o)], ngr[S4Vectors::subjectHits(o)])), S4Vectors::queryHits(o), sum)
+        bins[, cn := ploidy][as.integer(names(cbp)), cn := (as.numeric(cbp) + ploidy * (width - as.numeric(nbp))) / width]  # bp outside the graph's nodes: ploidy
     }
-    if (mode=='hic'){
-        depthest.hic = straw(filepath,res=as.integer(res),gr=wholegenome)
-    }else if (mode=='mcool'){
-        depthest.hic = cooler(filepath,res=as.integer(res),gr=wholegenome)
-    }else if (mode=='rds'){
-        depthest.hic = readRDS(filepath)
-    }else{
-        stop('Unrecognized Hi-C file mode: ',mode)
+    content = bins[keep == TRUE, sum(width * cn)]
+    # N: kept x kept pixels, each once (upper triangle), 10 kb self-pixels excluded
+    keepl = split(bins$keep, factor(bins$seqnames, levels = chrs))
+    if (mode == 'hic'){
+        pr = data.table::CJ(a = seq_along(chrs), b = seq_along(chrs))[a <= b]
+        Ns = parallel::mclapply(seq_len(nrow(pr)), function(r){
+            A = chrs[pr$a[r]]; B = chrs[pr$b[r]]
+            x = data.table::as.data.table(strawr::straw('NONE', hic, cname[[A]], cname[[B]], 'BP', as.integer(res)))
+            if (!nrow(x)) return(0)
+            xi = as.integer(x$x/res) + 1L; yi = as.integer(x$y/res) + 1L
+            sum(x$counts[keepl[[A]][xi] & keepl[[B]][yi] & (A != B | xi != yi)])
+        }, mc.cores = mc.cores)
+        N = sum(unlist(Ns))
+    } else {
+        grp = paste0('/resolutions/', as.integer(res))
+        bc = rhdf5::h5read(hic, paste0(grp, '/bins/chrom')); bs = rhdf5::h5read(hic, paste0(grp, '/bins/start'))
+        bc = sub('^chr', '', as.character(bc))
+        off = bins[, .(o = .I[1] - 1L), by = seqnames]; off = setNames(off$o, off$seqnames)
+        gid = ifelse(bc %in% chrs, off[bc] + as.integer(bs/res) + 1L, NA_integer_)  # file bin -> our bin
+        kb = !is.na(gid) & bins$keep[ifelse(is.na(gid), 1L, gid)]
+        dims = rhdf5::h5ls(hic)
+        np = as.numeric(dims$dim[dims$group == paste0(grp, '/pixels') & dims$name == 'count'])
+        chunk = 5e7; N = 0
+        for (s in seq(1, np, by = chunk)){
+            ix = list(seq(s, min(np, s + chunk - 1)))
+            b1 = rhdf5::h5read(hic, paste0(grp, '/pixels/bin1_id'), index = ix) + 1L
+            b2 = rhdf5::h5read(hic, paste0(grp, '/pixels/bin2_id'), index = ix) + 1L
+            ct = rhdf5::h5read(hic, paste0(grp, '/pixels/count'), index = ix)
+            N = N + sum(as.numeric(ct[kb[b1] & kb[b2] & b1 != b2]))
+        }
     }
-    sample.ploidy = purity*ploidy + (1-purity)*2
-    return(depthest.hic$value%>%sum * 300 / 3e9 * 2/sample.ploidy)
+    depth = N / (calib * content)
+    structure(depth, N = N, content = content, kept_bp = bins[keep == TRUE, sum(width)])
 }
 
 #returns negative log likelihood of test data given true data, each pixel weighted by widthprod/area0
 #widthprod: dat_test's column if present, else widths[i]*widths[j] (widths = tile widths of the map's gr,
 #needed for gMatrix $dat tables, which carry no widthprod), else area0 (all pixels weighted 1)
-compdats = function(dat_test,dat_true,theta=2,ifsum=TRUE,if.diag=TRUE,return_kl=F,area0=1e8,widths=NULL){
+compdats = function(dat_test,dat_true,theta=2,ifsum=TRUE,if.diag=FALSE,return_kl=F,area0=1e8,widths=NULL){
     setkey(dat_test,'id')
     setkey(dat_true,'id')
     ## fast path: same template on both sides (identical i/j/id after the sort), so the merge

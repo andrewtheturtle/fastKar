@@ -564,6 +564,8 @@ class HiC:
         bins = rd('bins')
         h.nbin = len(bins)
         h.bin_w = bins['width'].values.astype(float)
+        # bins kept for scoring (less than half in the reference mask; prep_data_for_py(mask =)); exports before 2026-11-18: all kept
+        h.bin_keep = (bins['keep'].astype(str).str.upper() == 'TRUE').values if 'keep' in bins.columns else np.ones(h.nbin, bool)
         h.bin_of_tile = tt['bin.id'].values.astype(int) - 1
         gm = rd('gm_dat')
         assert (gm['i'].values <= gm['j'].values).all()
@@ -622,31 +624,39 @@ def expected_map(hic, kar, dcut=1e10, conserve=False):
                          jnp.asarray(hic.tile_w), jnp.asarray(hic.tile_cn), hic.depth, dcut, C=tc_circ(hic, kar, I, J),
                          trans=conserve_trans(hic, kar) if conserve else None)
 
-def nll_of_bins(hic, mu, theta=2.0, weighted=True):
-    """compmaps conventions: NB NLL of the bin map mu over the upper triangle (incl. diagonal), pixel weight widthprod / area0
-    (area0 = median(bin width)^2; weighted=False: 1), observed counts rounded (HiC.load)"""
+def score_pixels(hic, diag=False):
+    """upper-triangle pixels that are scored (and counted in rescale totals): both bins kept (hic.bin_keep), diagonal only if diag"""
+    k = np.asarray(hic.bin_keep, bool)
+    return np.triu(np.ones((hic.nbin, hic.nbin), bool), 0 if diag else 1) & k[:, None] & k[None, :]
+
+def nll_of_bins(hic, mu, theta=2.0, weighted=True, diag=False):
+    """compmaps conventions: NB NLL of the bin map mu over the upper triangle, pixel weight widthprod / area0
+    (area0 = median(bin width)^2; weighted=False: 1), observed counts rounded (HiC.load). diag: include the diagonal (self-)pixels
+    (compmaps(if.diag = TRUE)); default False since 2026-11-18 (= compmaps(if.diag = FALSE)). Only pixels between kept bins
+    (hic.bin_keep; = compmaps(mask = keep))"""
     w = hic.bin_w; n = hic.nbin
     wp = jnp.asarray(w[:, None] * w[None, :]) / np.median(w) ** 2 if weighted else jnp.ones((n, n))
-    tri = jnp.asarray(np.triu(np.ones((n, n), bool)))
+    tri = jnp.asarray(score_pixels(hic, diag))
     return -jnp.sum(jnp.where(tri, wp * nb_logpmf(jnp.asarray(hic.x_obs), mu, theta), 0.0))
 
-def nll(g, hic, b, theta=2.0, weighted=True, conserve=False):
+def nll(g, hic, b, theta=2.0, weighted=True, conserve=False, diag=False):
     """full NLL of the wiring b on the data bins"""
-    return nll_of_bins(hic, to_bins(hic, expected_map(hic, kar(g, b), conserve=conserve)), theta, weighted)
+    return nll_of_bins(hic, to_bins(hic, expected_map(hic, kar(g, b), conserve=conserve)), theta, weighted, diag)
 
-def rescale_depth(g, hic, n, seed, batch=64, conserve=False):
+def rescale_depth(g, hic, n, seed, batch=64, conserve=False, diag=False):
     """multiply hic.depth (in place) by sum(observed) / median(sum(expected)) over n uniformly random wirings, both over the
-    upper triangle of the data-bin map; returns the ratio. The expected map is linear in depth."""
+    scored pixels of the data-bin map (score_pixels: kept bins, diagonal only if diag); returns the ratio. The expected map is linear in depth."""
+    P = score_pixels(hic, diag); Pj = jnp.asarray(P)
     if len(g.vnodes) == 0:
         n = 1
-    tot = jax.jit(jax.vmap(lambda b: jnp.sum(jnp.triu(to_bins(hic, expected_map(hic, kar(g, b), conserve=conserve))))))
+    tot = jax.jit(jax.vmap(lambda b: jnp.sum(jnp.where(Pj, to_bins(hic, expected_map(hic, kar(g, b), conserve=conserve)), 0.0))))
     r = random_b(g, jax.random.PRNGKey(seed + 7919), n)
     totals = np.concatenate([np.asarray(tot(r[i:i + batch])) for i in range(0, n, batch)])
-    ratio = float(np.sum(hic.x_obs) / np.median(totals))
+    ratio = float(np.sum(np.where(P, hic.x_obs, 0.0)) / np.median(totals))
     hic.depth *= ratio
     return ratio
 
-def nll_term(g, hic, dcut=1e10, theta=2.0, weighted=True, caps=(64, 128, 256, 512, 1024, 2048, 4096), conserve=False):
+def nll_term(g, hic, dcut=1e10, theta=2.0, weighted=True, caps=(64, 128, 256, 512, 1024, 2048, 4096), conserve=False, diag=False):
     """the exact NLL as an incremental Term; aux = (mu = full symmetric expected BIN map (diagonal = the bin's upper-triangle
     sum), nll). A move swaps b[i], b[j] for two rows of one node. Only the walks through those rows change, and the set S of
     tile copies on them is the same before and after. Copies on different walks have no contacts (beyond the constant
@@ -654,7 +664,8 @@ def nll_term(g, hic, dcut=1e10, theta=2.0, weighted=True, caps=(64, 128, 256, 51
     O(|S|^2) instead of O(ntc^2). S is gathered into a fixed-capacity buffer chosen by lax.switch over a ladder of capacities
     (so the update cannot be vmapped efficiently); the change of the tile map is summed into the bins of tiles(S) (to_bins).
     conserve: the conserved trans term (expected_map(conserve=True)). Every move changes Q, hence every trans pixel, so aux[0]
-    is the CIS bin map (updated as above) and each update rebuilds the trans bin map (trans_bins) and the full NLL (exact)."""
+    is the CIS bin map (updated as above) and each update rebuilds the trans bin map (trans_bins) and the full NLL (exact).
+    diag: score the diagonal (self-)pixels too (default False, as nll_of_bins)."""
     K = get_constants()
     var_a = jnp.asarray(g.var_a)
     ntc = len(hic.tc_uid); ntile = hic.ntile; nbin = hic.nbin; hd = 0.5 * hic.depth
@@ -662,6 +673,7 @@ def nll_term(g, hic, dcut=1e10, theta=2.0, weighted=True, caps=(64, 128, 256, 51
     w = hic.bin_w
     wp = jnp.asarray(w[:, None] * w[None, :] / np.median(w) ** 2) if weighted else jnp.ones((nbin, nbin))
     x = jnp.asarray(hic.x_obs)
+    P = jnp.asarray(score_pixels(hic, diag))  # scored pixels (kept bins; diagonal only if diag)
     bin_ext = jnp.asarray(np.append(hic.bin_of_tile, nbin))  # padded tile index ntile -> padded bin nbin
     caps = [c for c in sorted(caps) if c < ntc] + [ntc]
     caps_arr = jnp.asarray(caps)
@@ -688,8 +700,8 @@ def nll_term(g, hic, dcut=1e10, theta=2.0, weighted=True, caps=(64, 128, 256, 51
             dd = (jnp.diag(dB) + jnp.zeros(c).at[lb].add(jnp.diag(dmu), mode='drop')) / 2
             dB = dB.at[jnp.arange(c), jnp.arange(c)].set(dd)
             p, q = U[:, None], U[None, :]
-            ok = (p < nbin) & (q < nbin) & (p <= q)
             pc, qc = jnp.minimum(p, nbin - 1), jnp.minimum(q, nbin - 1)
+            ok = (p < nbin) & (q < nbin) & P[pc, qc]
             if conserve:  # NLL recomputed in full in update()
                 return 0.0, mu.at[p, q].add(dB, mode='drop')
             mo = mu[pc, qc]; xx = x[pc, qc]
@@ -703,15 +715,15 @@ def nll_term(g, hic, dcut=1e10, theta=2.0, weighted=True, caps=(64, 128, 256, 51
         mu = to_bins(hic, expected_map(hic, kar, dcut, conserve))
         if conserve:  # aux[0] = cis map
             mu = mu - hd * trans_bins(hic, *conserve_trans(hic, kar, K))
-            return mu, nll_of_bins(hic, full(mu, kar), theta, weighted)
-        return mu, nll_of_bins(hic, mu, theta, weighted)
+            return mu, nll_of_bins(hic, full(mu, kar), theta, weighted, diag)
+        return mu, nll_of_bins(hic, mu, theta, weighted, diag)
     def update(aux, ko, kn, i, j):
         tcw = ko.wid[Lu]
         mask = (tcw == ko.wid[var_a[i]]) | (tcw == ko.wid[var_a[j]])
         cnt = mask.sum()
         dnll, mu2 = jax.lax.switch(jnp.searchsorted(caps_arr, cnt), branches, (mask, cnt, ko, kn, aux[0]))
         if conserve:
-            return mu2, nll_of_bins(hic, full(mu2, kn), theta, weighted)
+            return mu2, nll_of_bins(hic, full(mu2, kn), theta, weighted, diag)
         return mu2, aux[1] + dnll
     return Term(init, lambda aux: aux[1], update)
 

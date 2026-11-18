@@ -81,8 +81,14 @@ test_that('NLLs weight each pixel by its area width_i * width_j / area0', {
         ## by hand, on the observed table (which carries no widthprod)
         d = merge(o$dat[, .(i, j, x = value)], mu$dat[, .(i, j, y = value)], by = c('i', 'j'))
         lp = dnbinom(round(d$x), mu = d$y, size = 2, log = TRUE); lp[d$y == 0] = 0
-        manual = -sum(lp * w[d$i] * w[d$j]) / median(w)^2
+        manual_all = -sum(lp * w[d$i] * w[d$j]) / median(w)^2
+        manual = -sum((lp * w[d$i] * w[d$j])[d$i != d$j]) / median(w)^2  ## default since 2026-11-18: diagonal pixels not scored
         expect_equal(opt('compmaps')(o, mu, ifsum = TRUE), manual, tolerance = 1e-10)
+        expect_equal(opt('compmaps')(o, mu, ifsum = TRUE, if.diag = TRUE), manual_all, tolerance = 1e-10)
+        ## mask: pixels with a dropped bin are not scored (logical per bin, as bestfit_search passes it)
+        keep = rep(TRUE, length(w)); keep[c(1, 3)] = FALSE
+        manual_keep = -sum((lp * w[d$i] * w[d$j])[d$i != d$j & keep[d$i] & keep[d$j]]) / median(w)^2
+        expect_equal(opt('compmaps')(o, mu, ifsum = TRUE, mask = keep), manual_keep, tolerance = 1e-10)
         ## compdats: widths for a gMatrix table give what a widthprod column gives
         dw = data.table::copy(o$dat)[, widthprod := w[i] * w[j]]
         expect_equal(opt('compdats')(o$dat, mu$dat, widths = w, area0 = 1e10), opt('compdats')(dw, mu$dat, area0 = 1e10), tolerance = 1e-12)
@@ -92,6 +98,17 @@ test_that('NLLs weight each pixel by its area width_i * width_j / area0', {
         ob = opt('rebin_matrix')(o, bins); mb = opt('rebin_matrix')(mu, bins)
         db = merge(ob$dat[, .(i, j, x = value)], mb$dat[, .(i, j, y = value)], by = c('i', 'j'))
         lpb = dnbinom(round(db$x), mu = db$y, size = 2, log = TRUE); lpb[db$y == 0] = 0
-        expect_equal(opt('compmaps')(ob, mu, ifsum = TRUE), -sum(lpb), tolerance = 1e-10)
+        expect_equal(opt('compmaps')(ob, mu, ifsum = TRUE), -sum(lpb[db$i != db$j]), tolerance = 1e-10)
+    }
+})
+
+test_that('kept_bins keeps bins less than half masked; sim_depth_ratio counts only kept, off-diagonal pixels', {
+    gr = GenomicRanges::GRanges('1', IRanges::IRanges(c(1, 101, 201, 301), width = 100))
+    mk = GenomicRanges::GRanges('chr1', IRanges::IRanges(c(101, 201, 301), c(149, 250, 400)))  ## 49%, 50%, 100% masked
+    expect_identical(opt('kept_bins')(gr, mk), c(TRUE, TRUE, FALSE, FALSE))
+    for (nm in c('toy_dtrans', 'ccle_dm_local')) {
+        m = prop_maps(nm); n = length(m$a$gr); keep = rep(TRUE, n); keep[2] = FALSE
+        tot = function(x) x$dat[i != j & keep[i] & keep[j], sum(value)]
+        expect_equal(opt('sim_depth_ratio')(m$a, list(m$b, scaled(m$b, 2), scaled(m$b, 3)), keep = keep), tot(m$a) / (2 * tot(m$b)), tolerance = 1e-10)
     }
 })

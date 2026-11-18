@@ -50,6 +50,19 @@ w0, c0 = pr.perms_to_walks(g, pr.walks_to_perms(g, sn, circ))
 check('truth walks round trip same_karyotype', pr.same_karyotype(w0, c0, sn, circ))
 h2 = pr.HiC.load(folder, g)
 check('rescale_depth ratio', close(pr.rescale_depth(g, h2, 64, 0), R['rescale_ratio']))
+# masked bins (bin_keep): full NLL == manual sum over pixels between kept bins; incremental == full; rescale over kept pixels
+hm = pr.HiC.load(folder, g); hm.bin_keep = np.ones(hm.nbin, bool); hm.bin_keep[[0, hm.nbin // 2]] = False
+b = bs[0]; mu = pr.to_bins(hm, pr.expected_map(hm, pr.kar(g, b)))
+wm = hm.bin_w[:, None] * hm.bin_w[None, :] / np.median(hm.bin_w) ** 2
+P = np.triu(np.ones((hm.nbin, hm.nbin), bool), 1) & hm.bin_keep[:, None] & hm.bin_keep[None, :]
+man = -float(np.sum(np.where(P, wm * np.asarray(pr.nb_logpmf(jnp.asarray(hm.x_obs), mu, 2.0)), 0.0)))
+check('mask: full NLL == manual kept-pixel sum', close(float(pr.nll(g, hm, b)), man))
+check('mask: NLL differs from unmasked', not close(float(pr.nll(g, hm, b)), float(pr.nll(g, h, b))))
+Tm = pr.nll_term(g, hm); updm = jax.jit(Tm.update); ko = pr.kar(g, b); aux = Tm.init(ko)
+for k in R['moves'][:50]:
+    i, j = g.moves[k]; b = b.at[i].set(b[j]).at[j].set(b[i]); kn = pr.kar(g, b)
+    aux = updm(aux, ko, kn, i, j); ko = kn
+check('mask: incremental == full after 50 moves', close(float(Tm.value(aux)), float(pr.nll(g, hm, b))))
 
 # (b) walk traversal vs Floyd-Warshall; expected map vs the dense end-distance path
 ok = True
