@@ -40,7 +40,11 @@ identifiability_context <- function(graph,
     ft = streduce(ft0 + buffer)
     target_width = sum(width(ft))
     hic_resolution = 1e3 * ceiling(target_width / (1e3 * hic_binsperft))
-    graph_cut = loosefix(graph$copy$disjoin(ft) %&% ft)
+    ## collapse = FALSE: split nodes at the edges of ft but keep nodes that share coordinates (the h1/h2
+    ## copies of a locus on allelic graphs) apart. The default (collapse = TRUE) merges them into one node
+    ## with summed CN, i.e. dephases the graph; it also merges parallel edges between the same node ends.
+    ## On graphs without overlapping nodes the cut nodes are the same either way.
+    graph_cut = loosefix(graph$copy$disjoin(ft, collapse = FALSE) %&% ft)
     if (graph_mode == 'footprint') {
         analysis_graph = graph_cut
     } else {
